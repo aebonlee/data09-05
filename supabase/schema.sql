@@ -20,6 +20,7 @@
 --    stock_movement  입고·출고 이력 레코드                ← parts[].records (inbound/outbound)
 --    unit_price      단가표·품목 기준정보 레코드          ← parts[].records (price)
 --    cause_memo      증감 원인 메모·AI 해설               ← localStorage 'memo.<기준일>.<공장 보기>'
+--    dead_confirm    불용 확정 품목(관련부서 확정 후 체크)  ← localStorage 'dead'
 --
 --  보안
 --    모든 표 RLS 켬. 행은 만든 사람(owner_id = auth.uid())만 보고 고칩니다.
@@ -37,9 +38,13 @@ create table if not exists public.app_settings (
   owner_id       uuid not null default auth.uid(),
   cur_date       date,                               -- 당월 기준일(월말)
   prev_date      date,                               -- 전월 기준일(비우면 당월의 전월 말일)
-  aging_months   text not null default '3, 6, 12',   -- Aging 구간 경계(개월), 쉼표 구분 — 제약은 1-B 절
-  over_months    int not null default 6,             -- 경과 개월이 넘으면 「과잉」
-  dead_months    int not null default 12,            -- 경과 개월이 넘으면 「불용」
+  aging_months   text not null default '3, 6, 12',   -- (예비) 예전 Aging 구간 경계 — 앱은 개월별 분포로 바뀌어 쓰지 않음
+  over_months    int not null default 6,             -- 과잉 구간을 켰을 때: 경과 개월이 넘으면 「과잉」
+  dead_months    int not null default 12,            -- (예비) 예전 불용 기준 — 불용은 이제 사람이 확정(dead_confirm)
+  long_raw_months  int not null default 12,          -- 원자재: 경과 개월이 이 값 이상이면 「장기재고」
+  long_prod_months int not null default 6,           -- 제품: 경과 개월이 이 값 이상이면 「장기재고」
+  aging_max_months int not null default 12,          -- 개월별 분포를 몇 개월까지 한 칸씩
+  over_enabled   boolean not null default false,     -- 과잉 구간 쓰기(기본 끔)
   no_out_policy  text not null default 'inbound'
                  check (no_out_policy in ('inbound', 'none')),
   amount_source  text not null default 'file'
@@ -163,6 +168,18 @@ create table if not exists public.cause_memo (
   constraint cause_memo_owner_key unique (owner_id, memo_key, kind, group_name)
 );
 
+-- 불용 확정 — 관련부서 확정 후 담당자가 품목마다 체크(도구가 판정하지 않음)
+create table if not exists public.dead_confirm (
+  id          bigint generated always as identity primary key,
+  owner_id    uuid not null default auth.uid(),
+  kind        text not null check (kind in ('raw', 'product')),
+  code        text not null check (length(btrim(code)) > 0),
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,kind,code'
+  constraint dead_confirm_owner_key unique (owner_id, kind, code)
+);
+
 -- ----------------------------------------------------------------------------
 -- 1-B. 2026-09-29 변경 — 예전 판(일 단위·자리마다 파일 하나)을 이미 실행한 프로젝트용.
 --      새로 설치하면 위 CREATE 에 이미 있어 아무 일도 하지 않습니다(재실행 안전).
@@ -175,6 +192,10 @@ alter table public.app_settings add column if not exists cause_top_n  int;
 alter table public.app_settings add column if not exists group_map    text;
 alter table public.app_settings add column if not exists group_others text;
 alter table public.app_settings add column if not exists plant_view   text;
+alter table public.app_settings add column if not exists long_raw_months  int not null default 12;
+alter table public.app_settings add column if not exists long_prod_months int not null default 6;
+alter table public.app_settings add column if not exists aging_max_months int not null default 12;
+alter table public.app_settings add column if not exists over_enabled boolean not null default false;
 
 -- 일 단위 값이 남아 있으면 개월로 바꿉니다(앱 migrateSettings 와 같은 환산: 일 ÷ 30.4375 반올림).
 do $mig$
@@ -220,9 +241,10 @@ alter table public.app_settings
 -- 화면(checkSettings)과 같은 개월 규칙
 alter table public.app_settings drop constraint if exists app_settings_months_check;
 alter table public.app_settings add constraint app_settings_months_check check (
-  over_months >= 0 and dead_months >= over_months and cause_top_n >= 1
+  over_months >= 0 and cause_top_n >= 1
   and aging_months ~ '^[[:space:]]*[1-9][0-9]*([[:space:]]*,?[[:space:]]*[1-9][0-9]*)*[[:space:]]*$'
-  and group_others in ('other', 'keep') and plant_view in ('', '인천', '대구'));
+  and group_others in ('other', 'keep') and plant_view in ('', '인천', '대구')
+  and long_raw_months >= 1 and long_prod_months >= 1 and aging_max_months between 1 and 36);
 
 -- 자리마다 파일 여러 개(공장별)
 alter table public.upload_slot add column if not exists part_key text not null default '';
@@ -273,7 +295,7 @@ do $trg$
 declare t text;
 begin
   foreach t in array array['app_settings','column_mapping','upload_slot',
-                           'stock_item','stock_movement','unit_price','cause_memo']
+                           'stock_item','stock_movement','unit_price','cause_memo','dead_confirm']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I
@@ -293,12 +315,13 @@ alter table public.stock_item     enable row level security;
 alter table public.stock_movement enable row level security;
 alter table public.unit_price     enable row level security;
 alter table public.cause_memo     enable row level security;
+alter table public.dead_confirm   enable row level security;
 
 -- 부모가 없는 표: owner_id 만 봅니다
 do $rls$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','cause_memo']
+  foreach t in array array['app_settings','column_mapping','upload_slot','cause_memo','dead_confirm']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);

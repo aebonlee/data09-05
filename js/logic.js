@@ -16,7 +16,8 @@
   var PLANT_FIELD = { key: 'plant', label: '공장(파일에 칸이 있으면)', required: false, syn: ['공장', '공장구분', '공장명', '사업장', '사업장명', '플랜트', 'plant', 'site'] };
   // 2026-09-29 실데이터(인천 본사·대구 재고분석 엑셀) 열 이름을 앞쪽에 넣었습니다(값은 리포에 없음).
   var COL = {
-    stockQty: ['재고수량', '수량', '기말재고수량', '당월재고수량', '현재고', '기말재고', '당월재고', '기말수량', '재고량', '재고', 'qty', 'quantity', 'stock'],
+ // 「=」로 시작하는 후보는 이름이 똑같을 때만 짝짓습니다(「합계」가 「합계금액」에 잡히지 않게 — 본사 7월 제품 시트의 수량 칸 이름이 「합계」)
+    stockQty: ['재고수량', '수량', '=합계', '기말재고수량', '당월재고수량', '현재고', '기말재고', '당월재고', '기말수량', '재고량', '재고', 'qty', 'quantity', 'stock'],
     stockAmt: ['금액(재고수량*입고단가)', '재고금액', '기말재고금액', '당월재고금액', '기말금액', '합계금액', '금액', 'amount'],
     prodAmt: ['재고*완제품단가', '합계금액', '금액(재고수량*입고단가)', '재고금액', '기말재고금액', '당월재고금액', '기말금액', '금액', 'amount'],
     stockPrice: ['입고단가', '재고단가', '단가', '평균단가', '이동평균단가', 'unitprice', 'price'],
@@ -71,7 +72,7 @@
       label: '출고·사용 이력',
       fields: [
         { key: 'code', label: '품번', required: true, syn: ['품번', '제품코드', '품목코드', '자재코드', '코드', 'itemcode', 'code'] },
-        { key: 'date', label: '출고일', required: true, syn: ['출고일', '출고일자', '사용일', '불출일', '일자', '날짜', 'date'] },
+        { key: 'date', label: '출고일(최근 출고일)', required: true, syn: ['최근출고일', '최종출고일', '마지막출고일', '출고일', '출고일자', '사용일', '불출일', '일자', '날짜', 'date'] },
         { key: 'qty', label: '출고수량', required: false, syn: ['출고수량', '사용수량', '불출수량', '수량', 'qty'] },
         PLANT_FIELD
       ]
@@ -106,7 +107,7 @@
     { id: 'prodCur', def: 'productStock', label: '제품 재고 — 당월' },
     { id: 'prodPrev', def: 'productStock', label: '제품 재고 — 전월' },
     { id: 'inbound', def: 'inbound', label: '입고 이력' },
-    { id: 'outbound', def: 'outbound', label: '출고·사용 이력' },
+    { id: 'outbound', def: 'outbound', label: '출고현황 · 출고 이력' },
     { id: 'price', def: 'price', label: '단가표 · 품목 기준정보' }
   ];
 
@@ -117,9 +118,13 @@
     return {
       curDate: '',          // 당월 기준일(월말). 비우면 분석 불가
       prevDate: '',         // 전월 기준일. 비우면 당월 기준일의 전월 말일
-      agingMonths: '3, 6, 12', // Aging 구간 경계(개월)
-      overMonths: 6,        // 경과 개월이 이 값을 넘으면 「과잉」
-      deadMonths: 12,       // 경과 개월이 이 값을 넘으면 「불용」
+      // 판정 체계(2026-09-29 수강생 답변): 세부는 Aging 으로 「정상 / 장기재고」, 총괄은 「정상 / 불용」 2단계.
+      // 불용은 관련부서 확정 후 판정하므로 도구가 정하지 않고, 품목마다 사람이 「불용 확정」을 체크합니다.
+      longRawMonths: 12,    // 원자재: 경과 개월이 이 값 「이상」이면 장기재고 (향후 24로 바꿀 예정)
+      longProdMonths: 6,    // 제품(·반제품): 경과 개월이 이 값 「이상」이면 장기재고
+      agingMaxMonths: 12,   // 개월별 분포를 몇 개월까지 따로 보일지 — 넘는 것은 「N+1개월 이상」 한 칸 (최대 36)
+      overEnabled: '',      // 과잉 구간 쓰기(기본 끔). 'on' 이면 경과 개월이 overMonths 를 넘고 장기재고 미만인 품목을 「과잉」
+      overMonths: 6,
       noOutPolicy: 'inbound', // 출고 이력 없는 품목: inbound=입고일로 대신, none=판정 보류
       amountSource: 'file',   // file=재고 파일 금액 우선(없으면 단가표), price=단가표 우선 — 실데이터 재고 파일에 금액 칸이 있어 file 이 기본
       topN: 10,             // 금액 증가 상위 N건
@@ -127,7 +132,9 @@
       causeTopN: 5,         // 증감 원인 — 대분류마다 기여 상위 몇 품목을 보일지
       // 원자재 대분류 묶음표 — ERP 대분류 코드(HSG·TML …)를 보고서 대분류(하우징류·터미널류 …)로 묶습니다.
       // 실데이터 본사 「원자재」 요약 시트와 같은 값이 나오는 짝을 처음 값으로 넣었습니다(기획서 11장 확인 목록).
-      groupMap: 'HSG=하우징류\nSEAL=씰류\nTML=터미널류\nTUBE=튜브류\nWIRE=와이어류\nCLIP=클립류\nSWITCH=스위치',
+      // 두 공장 공통 하나(2026-09-29 답변: 대구·인천 통일). 인천 요약표 기준으로 클립류·스위치를 따로 두고,
+      // 파크라케이블(CI184)은 인천공장 품목만(답변 3번).
+      groupMap: 'HSG=하우징류\nSEAL=씰류\nTML=터미널류\nTUBE=튜브류\nWIRE=와이어류\nCLIP=클립류\nSWITCH=스위치\n인천:품번:CI184-*=파크라케이블(CI184)',
       groupOthers: 'other', // 묶음표에 없는 대분류: other=「기타」로 모음, keep=적힌 그대로
       plantView: ''         // 보기: '' = 인천+대구 합계, '인천', '대구'
     };
@@ -143,16 +150,11 @@
     var out = {};
     Object.keys(defaults).forEach(function (k) { out[k] = saved[k] == null ? defaults[k] : saved[k]; });
     var migrated = false;
-    if (saved.agingMonths == null && saved.agingBounds != null) {
-      var list = String(saved.agingBounds).split(/[,\s]+/).map(Number).filter(function (n) { return isFinite(n) && n > 0; })
-        .map(function (n) { return Math.max(1, daysToMonths(n)); });
-      list.sort(function (a, b) { return a - b; });
-      list = list.filter(function (n, i) { return i === 0 || n !== list[i - 1]; });
-      if (list.length) out.agingMonths = list.join(', ');
-      migrated = true;
-    }
+    // 예전 Aging 구간 경계(90·180·365일 또는 3·6·12개월)는 이제 쓰지 않습니다 — 개월별 분포(0·1·2…개월)로 보입니다.
+    if (saved.agingBounds != null || saved.agingMonths != null) migrated = true;
+    // 예전 불용 기준(일 또는 개월)은 원자재 장기재고 기준으로 옮기지 않습니다(판정 체계가 바뀜 — 기본 12개월 이상).
     if (saved.overMonths == null && saved.overDays != null && saved.overDays !== '' && isFinite(Number(saved.overDays))) { out.overMonths = daysToMonths(saved.overDays); migrated = true; }
-    if (saved.deadMonths == null && saved.deadDays != null && saved.deadDays !== '' && isFinite(Number(saved.deadDays))) { out.deadMonths = daysToMonths(saved.deadDays); migrated = true; }
+    if (saved.deadDays != null || saved.deadMonths != null) migrated = true;
     return { settings: out, migrated: migrated };
   }
 
@@ -257,7 +259,9 @@
       def.fields.forEach(function (f) {
         if (map[f.key]) return;
         for (var s = 0; s < f.syn.length && !map[f.key]; s++) {
-          var target = normHeader(f.syn[s]);
+          var exactOnly = f.syn[s].charAt(0) === '=';
+          if (exactOnly && !exact) continue;
+          var target = normHeader(exactOnly ? f.syn[s].slice(1) : f.syn[s]);
           for (var i = 0; i < headers.length; i++) {
             if (used[headers[i]] || !norm[i]) continue;
             if (skipAvoid && avoid.test(norm[i])) continue;
@@ -549,39 +553,27 @@
     return Math.round(n * f) / f;
   }
 
-  // Aging 구간(개월): 경계 [3,6,12] → 0~3개월 / 4~6개월 / 7~12개월 / 12개월 초과
-  // 경과 개월은 정수이므로 경계도 1 이상의 정수만 받습니다.
-  function parseBounds(text) {
-    var list = String(text == null ? '' : text).split(/[,\s]+/).filter(function (x) { return x !== ''; }).map(Number)
-      .filter(function (n) { return isFinite(n) && n > 0 && Math.floor(n) === n; });
-    list.sort(function (a, b) { return a - b; });
-    return list.filter(function (n, i) { return i === 0 || n !== list[i - 1]; });
+  // Aging 분포(개월): 구간(3·6·9) 대신 실제 경과 개월 0·1·2 … max 를 한 칸씩, max 를 넘으면 「max+1개월 이상」 한 칸.
+  // 파일의 「12 개월초과」는 13 으로 읽으므로 max 가 12 면 「13개월 이상」에 들어갑니다.
+  function bucketOf(months, max) {
+    if (months == null) return '날짜 없음';
+    return months <= max ? months + '개월' : (max + 1) + '개월 이상';
   }
-  function boundsInvalid(text) {
-    return String(text == null ? '' : text).split(/[,\s]+/).filter(function (x) { return x !== ''; })
-      .some(function (x) { var n = Number(x); return !(isFinite(n) && n > 0 && Math.floor(n) === n); });
+  function bucketLabels(max) {
+    var out = [];
+    for (var m = 0; m <= max; m++) out.push(m + '개월');
+    out.push((max + 1) + '개월 이상');
+    out.push('날짜 없음');
+    return out;
   }
-  function bucketLabels(bounds) {
-    var labels = [];
-    var lo = 0;
-    bounds.forEach(function (b) { labels.push(lo + '~' + b + '개월'); lo = b + 1; });
-    labels.push((bounds.length ? bounds[bounds.length - 1] : 0) + '개월 초과');
-    labels.push('날짜 없음');
-    return labels;
-  }
-  function bucketOf(months, bounds) {
-    var labels = bucketLabels(bounds);
-    if (months == null) return labels[labels.length - 1];
-    for (var i = 0; i < bounds.length; i++) if (months <= bounds[i]) return labels[i];
-    return labels[bounds.length];
-  }
-  // 적정성: Aging(표시 기준) 경과 개월로 나눕니다(기획서 5장·11장).
-  function fitnessOf(months, overMonths, deadMonths) {
+  // 판정: 장기재고 기준 「이상」, 과잉은 켰을 때만(넘으면)
+  function fitnessOf(months, longMonths, overMonths) {
     if (months == null) return '판정 보류';
-    if (deadMonths != null && months > deadMonths) return '불용';
+    if (longMonths != null && months >= longMonths) return '장기재고';
     if (overMonths != null && months > overMonths) return '과잉';
-    return '적정';
+    return '정상';
   }
+  function isInt(n, min, max) { return n != null && !isNaN(n) && Math.floor(n) === n && n >= min && (max == null || n <= max); }
 
   // 대분류 묶음표 읽기. 한 줄에 하나:  HSG=하우징류   /   품번:CI184-*=파크라케이블(CI184)
   //   「품번:」으로 시작하면 품번(앞부분 일치, 끝의 *)으로 묶고, 대분류 코드보다 먼저 봅니다.
@@ -593,18 +585,23 @@
       var eq = t.lastIndexOf('=');
       if (eq <= 0 || eq === t.length - 1) { out.errors.push((i + 1) + '번째 줄은 「코드=보고서 대분류」 형식이 아닙니다.'); return; }
       var key = t.slice(0, eq).trim(), name = t.slice(eq + 1).trim();
-      var cm = key.match(/^품번\s*[:：]\s*(.+)$/);
-      if (cm) out.byCode.push({ prefix: cm[1].replace(/\*$/, '').trim().toUpperCase(), name: name });
+      // 「인천:품번:CI184-*=…」처럼 앞에 공장을 붙이면 그 공장 품목에만 씁니다
+      var cm = key.match(/^(?:([^:：]+)\s*[:：]\s*)?품번\s*[:：]\s*(.+)$/);
+      if (cm) out.byCode.push({ plant: cm[1] ? normalizePlant(cm[1]) : '', prefix: cm[2].replace(/\*$/, '').trim().toUpperCase(), name: name });
       else out.byGroup[key.toUpperCase()] = name;
       out.count++;
     });
     return out;
   }
   // 품목 하나의 보고서 대분류. 묶음표가 비어 있으면 적힌 그대로 둡니다.
-  function mapGroup(group, code, gm, others) {
+  // plants: 그 품목이 있는 공장들(공장을 붙인 품번 규칙에 씀)
+  function mapGroup(group, code, gm, others, plants) {
     if (!gm || !gm.count) return group;
     var c = String(code || '').toUpperCase();
-    for (var i = 0; i < gm.byCode.length; i++) if (c.indexOf(gm.byCode[i].prefix) === 0) return gm.byCode[i].name;
+    for (var i = 0; i < gm.byCode.length; i++) {
+      var r = gm.byCode[i];
+      if (c.indexOf(r.prefix) === 0 && (!r.plant || (plants || []).indexOf(r.plant) >= 0)) return r.name;
+    }
     var g = String(group || '').trim().toUpperCase();
     if (gm.byGroup[g]) return gm.byGroup[g];
     // 이미 보고서 대분류 이름이면(예: 예시 데이터) 그대로
@@ -620,12 +617,13 @@
     var prev = s.prevDate ? parseDate(s.prevDate) : (cur ? prevMonthEnd(cur) : null);
     if (s.prevDate && !prev) errors.push('전월 기준일 형식이 올바르지 않습니다.');
     if (cur && prev && prev >= cur) errors.push('전월 기준일은 당월 기준일보다 앞이어야 합니다.');
-    var over = toNumber(s.overMonths), dead = toNumber(s.deadMonths);
-    if (over == null || isNaN(over) || over < 0 || Math.floor(over) !== over) errors.push('과잉 기준 개월을 0 이상 정수로 입력해 주세요.');
-    if (dead == null || isNaN(dead) || dead < 0 || Math.floor(dead) !== dead) errors.push('불용 기준 개월을 0 이상 정수로 입력해 주세요.');
-    if (!errors.length && dead < over) errors.push('불용 기준 개월은 과잉 기준 개월보다 크거나 같아야 합니다.');
-    if (boundsInvalid(s.agingMonths)) errors.push('Aging 구간 경계는 1 이상의 정수(개월)로 입력해 주세요(예: 3, 6, 12).');
-    else if (!parseBounds(s.agingMonths).length) errors.push('Aging 구간 경계를 하나 이상 입력해 주세요(예: 3, 6, 12).');
+    var longRaw = toNumber(s.longRawMonths), longProd = toNumber(s.longProdMonths), maxM = toNumber(s.agingMaxMonths);
+    var overOn = s.overEnabled === 'on' || s.overEnabled === true;
+    var over = toNumber(s.overMonths);
+    if (!isInt(longRaw, 1)) errors.push('원자재 장기재고 기준 개월을 1 이상 정수로 입력해 주세요.');
+    if (!isInt(longProd, 1)) errors.push('제품 장기재고 기준 개월을 1 이상 정수로 입력해 주세요.');
+    if (!isInt(maxM, 1, 36)) errors.push('개월별 분포 최대 개월은 1~36 사이 정수로 입력해 주세요.');
+    if (overOn && !isInt(over, 0)) errors.push('과잉 기준 개월을 0 이상 정수로 입력해 주세요.');
     var topN = toNumber(s.topN);
     if (topN == null || isNaN(topN) || topN < 0) errors.push('증가 상위 건수를 0 이상 숫자로 입력해 주세요.');
     var tm = toNumber(s.turnoverMax);
@@ -637,8 +635,8 @@
     var pv = s.plantView || '';
     return {
       ok: !errors.length, errors: errors,
-      cur: cur, prev: prev, bounds: parseBounds(s.agingMonths),
-      overMonths: over, deadMonths: dead, topN: topN, turnoverMax: tm, causeTopN: ctn,
+      cur: cur, prev: prev, agingMax: maxM, longRaw: longRaw, longProd: longProd,
+      overMonths: overOn ? over : null, topN: topN, turnoverMax: tm, causeTopN: ctn,
       groupMap: gm, groupOthers: s.groupOthers === 'keep' ? 'keep' : 'other',
       plantView: isPlant(pv) ? pv : '',
       noOutPolicy: s.noOutPolicy === 'none' ? 'none' : 'inbound',
@@ -683,7 +681,7 @@
       var turnover = avg > 0 && outQty != null ? outQty / avg : null;
       var change = !p || prevQty === 0 ? (curQty === 0 ? '유지' : '신규') : (!c || curQty === 0 ? '소멸' : '유지');
       var groupRaw = (c && c.group && c.group !== '(분류 없음)' ? c.group : '') || (p && p.group && p.group !== '(분류 없음)' ? p.group : '') || ms.group || '';
-      var group = ctx.kindIsRaw ? mapGroup(groupRaw, code, ctx.groupMap, ctx.groupOthers) : (groupRaw || '(분류 없음)');
+      var group = ctx.kindIsRaw ? mapGroup(groupRaw, code, ctx.groupMap, ctx.groupOthers, mergePlants(c, p)) : (groupRaw || '(분류 없음)');
       if (!group) group = '(분류 없음)';
       var it = {
         code: code,
@@ -701,8 +699,9 @@
         lastIn: lastIn, lastOut: lastOut, agingIn: agingIn, agingOut: agingOut,
         agingInDays: agingInDays, agingOutDays: agingOutDays, agingFile: agingFile, agingFileText: c ? c.agingFileText : '',
         agingShown: shown, agingShownDays: shownDays, agingBasis: basis,
-        bucket: bucketOf(shown, ctx.bounds),
-        fitness: curQty > 0 ? fitnessOf(shown, ctx.overMonths, ctx.deadMonths) : '재고 없음',
+        bucket: bucketOf(shown, ctx.agingMax),
+        fitness: curQty > 0 ? fitnessOf(shown, ctx.kindIsRaw ? ctx.longRaw : ctx.longProd, ctx.overMonths) : '재고 없음',
+        deadConfirmed: !!(ctx.dead && ctx.dead[ctx.kindIsRaw ? 'raw' : 'product'] && ctx.dead[ctx.kindIsRaw ? 'raw' : 'product'][code]),
         inQty: inQty, outQty: outQty, flowSource: flowSource,
         inQtyPrev: ctx.hasInbound ? ctx.inQtyPrev[code] || 0 : null,
         outQtyPrev: ctx.hasOutbound ? ctx.outQtyPrev[code] || 0 : null,
@@ -712,7 +711,8 @@
       return it;
     });
     return {
-      items: items, groups: groupSummary(items, ctx.kindIsRaw ? ctx.groupOrder : null), buckets: bucketSummary(items, ctx.bounds), fitness: fitnessSummary(items),
+      items: items, groups: groupSummary(items, ctx.kindIsRaw ? ctx.groupOrder : null), buckets: bucketSummary(items, ctx.agingMax, ctx.kindIsRaw ? ctx.longRaw : ctx.longProd), fitness: fitnessSummary(items), overall: overallSummary(items),
+      longMonths: ctx.kindIsRaw ? ctx.longRaw : ctx.longProd,
       cause: causeSummary(items, ctx.causeTopN, ctx.kindIsRaw ? ctx.groupOrder : null), hasFlow: hasFlow
     };
   }
@@ -879,10 +879,14 @@
     g.qtyRate = rate(g.prevQty, g.curQty); g.amtRate = rate(g.prevAmt, g.curAmt);
     return g;
   }
-  function bucketSummary(items, bounds) {
-    var labels = bucketLabels(bounds);
+  // 개월별 분포 — 0·1·…·max 개월 + 「max+1개월 이상」 + 날짜 없음. long: 그 칸이 장기재고 기준 이상인가
+  function bucketSummary(items, max, longMonths) {
+    var labels = bucketLabels(max);
     var map = {};
-    labels.forEach(function (l) { map[l] = { bucket: l, count: 0, qty: 0, amount: 0 }; });
+    labels.forEach(function (l, i) {
+      var month = i <= max + 1 ? i : null;
+      map[l] = { bucket: l, month: month, count: 0, qty: 0, amount: 0, long: month != null && month >= longMonths };
+    });
     items.forEach(function (it) {
       if (it.curQty === 0) return;
       var b = map[it.bucket];
@@ -891,7 +895,7 @@
     return labels.map(function (l) { map[l].amount = round(map[l].amount, 2); return map[l]; });
   }
   function fitnessSummary(items) {
-    var labels = ['적정', '과잉', '불용', '판정 보류'];
+    var labels = ['정상', '과잉', '장기재고', '판정 보류'];
     var map = {};
     labels.forEach(function (l) { map[l] = { fitness: l, count: 0, qty: 0, amount: 0 }; });
     items.forEach(function (it) {
@@ -900,6 +904,16 @@
       f.count++; f.qty += it.curQty; f.amount += it.curAmt || 0;
     });
     return labels.map(function (l) { map[l].amount = round(map[l].amount, 2); return map[l]; });
+  }
+  // 총괄 2단계: 정상 / 불용(사람이 확정한 품목만)
+  function overallSummary(items) {
+    var out = { '정상': { label: '정상', count: 0, qty: 0, amount: 0 }, '불용': { label: '불용(확정)', count: 0, qty: 0, amount: 0 } };
+    items.forEach(function (it) {
+      if (it.curQty === 0) return;
+      var o = out[it.deadConfirmed ? '불용' : '정상'];
+      o.count++; o.qty += it.curQty; o.amount += it.curAmt || 0;
+    });
+    return [out['정상'], out['불용']].map(function (o) { o.amount = round(o.amount, 2); return o; });
   }
 
   // ── 관리대상 후보 ────────────────────────────────────────────
@@ -923,8 +937,9 @@
     inc.slice(0, ctx.topN || 0).forEach(function (it, i) { add(it, '금액 증가 상위 ' + (i + 1) + '위'); });
     items.forEach(function (it) {
       if (it.curQty <= 0) return;
-      if (it.fitness === '불용') add(it, '불용(장기 미출고)');
+      if (it.fitness === '장기재고') add(it, '장기재고(Aging ' + (kindLabel === '원자재' ? ctx.longRaw : ctx.longProd) + '개월 이상)');
       else if (it.fitness === '과잉') add(it, '과잉');
+      if (it.deadConfirmed) add(it, '불용 확정');
       if (ctx.turnoverMax != null && it.turnover != null && it.turnover < ctx.turnoverMax) add(it, '저회전');
     });
     return Object.keys(byCode).map(function (k) { return byCode[k]; });
@@ -952,9 +967,11 @@
   // ── 전체 분석 ────────────────────────────────────────────────
   // data: { rawCur, rawPrev, prodCur, prodPrev, inbound, outbound, price } 각 레코드 배열
   // settings.plantView 가 '인천'·'대구'면 그 공장 자료만, 비어 있으면 합계(인천+대구)로 분석합니다.
-  function analyze(data, settings) {
+  // opts.dead: 사람이 「불용 확정」한 품목 { raw: { 품번: true }, product: { ... } }
+  function analyze(data, settings, opts) {
     var s = checkSettings(settings || {});
     if (!s.ok) return { ok: false, errors: s.errors };
+    s.dead = (opts && opts.dead) || {};
     var all = data || {};
     var res = analyzeFiltered(filterByPlant(all, s.plantView), s);
     res.plantView = s.plantView;
@@ -965,7 +982,7 @@
     var prices = data.price || [];
     var prevPrev = prevMonthEnd(s.prev);
     var ctx = {
-      cur: s.cur, prev: s.prev, bounds: s.bounds, overMonths: s.overMonths, deadMonths: s.deadMonths,
+      cur: s.cur, prev: s.prev, agingMax: s.agingMax, longRaw: s.longRaw, longProd: s.longProd, overMonths: s.overMonths, dead: s.dead,
       topN: s.topN, turnoverMax: s.turnoverMax, noOutPolicy: s.noOutPolicy, amountSource: s.amountSource, causeTopN: s.causeTopN,
       groupMap: s.groupMap, groupOthers: s.groupOthers, groupOrder: groupOrderOf(s.groupMap),
       curPrice: priceMapAt(prices, s.cur), prevPrice: priceMapAt(prices, s.prev), master: masterMap(prices),
@@ -982,7 +999,7 @@
     var unmatched = unmatchedList(raw.items, '원자재', ctx.amountSource).concat(unmatchedList(prod.items, '제품', ctx.amountSource));
     return {
       ok: true, errors: [],
-      curDate: toDateStr(s.cur), prevDate: toDateStr(s.prev), bounds: s.bounds,
+      curDate: toDateStr(s.cur), prevDate: toDateStr(s.prev), agingMax: s.agingMax, longRaw: s.longRaw, longProd: s.longProd,
       hasHistory: { inbound: ctx.hasInbound, outbound: ctx.hasOutbound, price: !!prices.length },
       raw: raw, product: prod, targets: targets, unmatched: unmatched
     };
@@ -1050,32 +1067,37 @@
   function itemSheet(kind, codeLabel, groupLabel) {
     var head = [codeLabel, '품명', groupLabel, '대분류 원래 값', '공장', '구분', '전월 수량', '당월 수량', '수량 증감', '수량 증감률(%)',
       '전월 단가', '당월 단가', '전월 금액', '당월 금액', '금액 증감', '금액 증감률(%)', '당월 금액 출처',
-      '최근 입고일', '최근 출고일', 'Aging 입고일 기준(개월)', 'Aging 출고일 기준(개월)', '파일 경과 개월', 'Aging 표시(개월)', '표시 기준', '경과 일수(표시 기준, 참고)', 'Aging 구간', '적정성',
+      '최근 입고일', '최근 출고일', 'Aging 입고일 기준(개월)', 'Aging 출고일 기준(개월)', '파일 경과 개월', 'Aging 표시(개월)', '표시 기준', '경과 일수(표시 기준, 참고)', 'Aging 분포 칸', '판정(Aging)', '불용 확정',
       '당월 입고수량', '당월 출고수량', '회전율', '수량 효과(입고)', '수량 효과(출고·사용)', '수량 효과(조정·기타)', '단가 효과', '신규·소멸·미산정', '가장 큰 요인'];
     var rows = kind.items.map(function (it) {
       var e = it.effects;
       return [it.code, it.name, it.group, it.groupRaw, it.plants.join('·'), it.change, it.prevQty, it.curQty, it.diffQty, changeRate(it.prevQty, it.curQty, it.qtyRate),
         blank(it.prevPrice), blank(it.curPrice), blank(it.prevAmt), blank(it.curAmt), blank(it.diffAmt), changeRate(it.prevAmt || 0, it.curAmt || 0, it.amtRate),
-        it.curAmtSource, it.lastIn, it.lastOut, blank(it.agingIn), blank(it.agingOut), blank(it.agingFileText || it.agingFile), blank(it.agingShown), it.agingBasis, blank(it.agingShownDays), it.bucket, it.fitness,
+        it.curAmtSource, it.lastIn, it.lastOut, blank(it.agingIn), blank(it.agingOut), blank(it.agingFileText || it.agingFile), blank(it.agingShown), it.agingBasis, blank(it.agingShownDays), it.bucket, it.fitness, it.deadConfirmed ? '확정' : '',
         blank(it.inQty), blank(it.outQty), blank(it.turnover), e.inflow, e.outflow, e.adjust, e.price, round(e.newItem + e.goneItem + e.noAmount, 2), it.driver];
     });
     return [head].concat(rows);
   }
   function bucketSheet(res) {
-    var head = ['구분', 'Aging 구간(개월, 표시 기준)', '품목 수', '재고수량', '재고금액'];
+    var head = ['구분', '경과 개월(표시 기준)', '품목 수', '재고수량', '재고금액', '판정'];
     var rows = [];
     [['원자재', res.raw], ['제품', res.product]].forEach(function (k) {
-      k[1].buckets.forEach(function (b) { rows.push([k[0], b.bucket, b.count, b.qty, b.amount]); });
+      k[1].buckets.forEach(function (b) { rows.push([k[0], b.bucket, b.count, b.qty, b.amount, b.month == null ? '' : (b.long ? '장기재고' : '정상')]); });
     });
     rows.push([]);
-    rows.push(['구분', '적정성', '품목 수', '재고수량', '재고금액']);
+    rows.push(['구분', '세부 판정(Aging)', '품목 수', '재고수량', '재고금액', '']);
     [['원자재', res.raw], ['제품', res.product]].forEach(function (k) {
-      k[1].fitness.forEach(function (f) { rows.push([k[0], f.fitness, f.count, f.qty, f.amount]); });
+      k[1].fitness.forEach(function (f) { rows.push([k[0], f.fitness, f.count, f.qty, f.amount, '']); });
+    });
+    rows.push([]);
+    rows.push(['구분', '총괄(정상/불용)', '품목 수', '재고수량', '재고금액', '']);
+    [['원자재', res.raw], ['제품', res.product]].forEach(function (k) {
+      k[1].overall.forEach(function (f) { rows.push([k[0], f.label, f.count, f.qty, f.amount, '']); });
     });
     return [head].concat(rows);
   }
   function targetSheet(res) {
-    var head = ['구분', '품번', '품명', '대분류·고객사', '선정 사유', '당월 수량', '당월 금액', '수량 증감', '금액 증감', 'Aging 표시(개월)', '표시 기준', '최근 출고일', '적정성', '회전율', '원인(담당자 기입)', '개선방안(담당자 기입)'];
+    var head = ['구분', '품번', '품명', '대분류·고객사', '선정 사유', '당월 수량', '당월 금액', '수량 증감', '금액 증감', 'Aging 표시(개월)', '표시 기준', '최근 출고일', '판정(Aging)', '회전율', '원인(담당자 기입)', '개선방안(담당자 기입)'];
     return [head].concat(res.targets.map(function (t) {
       return [t.kind, t.code, t.name, t.group, t.reasons.join(', '), t.curQty, blank(t.curAmt), t.diffQty, blank(t.diffAmt), blank(t.agingShown), t.agingBasis, t.lastOut, t.fitness, blank(t.turnover), '', ''];
     }));
@@ -1124,8 +1146,10 @@
     return [['항목', '값'],
       ['보기(공장)', res.plantView || '합계(인천+대구)'],
       ['당월 기준일', res.curDate], ['전월 기준일', res.prevDate],
-      ['Aging 구간 경계(개월)', res.bounds.join(', ')],
-      ['과잉 기준(개월 초과)', settings.overMonths], ['불용 기준(개월 초과)', settings.deadMonths],
+      ['Aging 표시', '개월별 분포 0~' + res.agingMax + '개월, ' + (res.agingMax + 1) + '개월 이상은 한 칸'],
+      ['장기재고 기준(원자재)', res.longRaw + '개월 이상'], ['장기재고 기준(제품)', res.longProd + '개월 이상'],
+      ['과잉 구간', settings.overEnabled === 'on' ? settings.overMonths + '개월 초과 ~ 장기재고 미만' : '쓰지 않음'],
+      ['불용', '관련부서 확정 후 품목별 「불용 확정」 체크(도구가 판정하지 않음)'],
       ['경과 개월 계산', '달력 월 차이. 기준일의 일이 시작일의 일보다 작으면 1을 빼되, 기준일이 말일이면 빼지 않음'],
       ['출고 이력 없는 품목', '재고 파일의 경과 개월 칸 → ' + (settings.noOutPolicy === 'none' ? '판정 보류' : '최근 입고일로 대신')],
       ['금액 산출', settings.amountSource === 'price' ? '단가표 우선, 없으면 파일 금액' : '파일 금액 우선, 없으면 단가표'],
@@ -1148,7 +1172,7 @@
       '제품_고객사별': groupSheet(res.product, '고객사'),
       '제품_증감원인': causeSheet(res.product, '고객사', memos.product),
       '제품_품목별': itemSheet(res.product, '제품코드', '고객사'),
-      'Aging_적정성': bucketSheet(res),
+      'Aging_개월별': bucketSheet(res),
       '관리대상': targetSheet(res),
       '단가_미매칭': unmatchedSheet(res),
       '기준': settingsSheet(res, settings, sample)
@@ -1165,7 +1189,7 @@
     normalizePlant: normalizePlant, plantFromFileName: plantFromFileName, isPlant: isPlant, plantLabel: plantLabel, assignPlant: assignPlant, filterByPlant: filterByPlant,
     parseGroupMap: parseGroupMap, mapGroup: mapGroup,
     lastDateByCode: lastDateByCode, sumQtyByCode: sumQtyByCode, priceMapAt: priceMapAt, rate: rate, round: round,
-    parseBounds: parseBounds, bucketLabels: bucketLabels, bucketOf: bucketOf, fitnessOf: fitnessOf,
+    bucketLabels: bucketLabels, bucketOf: bucketOf, fitnessOf: fitnessOf,
     checkSettings: checkSettings, analyze: analyze, decompose: decompose, causeSentence: causeSentence, buildCausePrompt: buildCausePrompt,
     buildSheets: buildSheets, pct: pct
   };

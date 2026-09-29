@@ -34,6 +34,9 @@
     // 저장된 그대로(예전 일 단위 키 포함) — 개월 단위로 자동 변환할 때 씁니다
     getSettingsRaw: function () { return getJson('settings', null); },
     // 증감 원인 메모·AI 해설 — 기준일·공장 보기별로 따로 { raw: { 대분류: { memo, ai } }, product: {...} }
+    // 불용 확정 품목 { raw: { 품번: true }, product: {...} } — 관련부서 확정 후 담당자가 체크
+    getDead: function () { return getJson('dead', {}); },
+    setDead: function (d) { return set('dead', JSON.stringify(d)); },
     getMemos: function (key) { return getJson('memo.' + key, {}); },
     setMemos: function (key, m) { return set('memo.' + key, JSON.stringify(m)); },
     // 자료 종류별 컬럼 짝 — 다음 달 파일에도 그대로 씁니다

@@ -183,3 +183,14 @@ table.wide td:nth-child(2) { min-width: 8em; }
 @media (max-width: 900px) { .memo-grid { grid-template-columns: minmax(0, 1fr); } }
 .prompt-box { width: 100%; min-height: 160px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
 .check { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Aging 개월별 분포 그래프 */
+.chart-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; }
+.aging-chart { display: block; width: 100%; height: auto; }
+.aging-chart .bar { fill: var(--primary); }
+.aging-chart .bar.long { fill: var(--dead); }
+.aging-chart .axis { stroke: var(--line); stroke-width: 1; }
+.aging-chart .cut { stroke: var(--dead); stroke-width: 2; stroke-dasharray: 5 4; }
+.aging-chart .tick { font-size: 12px; fill: var(--muted); text-anchor: middle; }
+.aging-chart .cut-label { font-size: 12px; fill: var(--dead); font-weight: 700; }
+.aging-chart .axis-label { font-size: 12px; fill: var(--muted); text-anchor: middle; }

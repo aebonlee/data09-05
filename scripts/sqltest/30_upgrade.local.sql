@@ -36,6 +36,8 @@ begin
   raise notice '  OK   예전 재고 행은 그대로(공장 미지정)';
   insert into public.app_settings (owner_id) values ('aaaaaaaa-0000-0000-0000-000000000003');
   raise notice '  OK   예전 일 단위 칸의 NOT NULL 이 풀려 새 설정을 넣을 수 있다';
+  if (select long_raw_months from public.app_settings where owner_id = 'aaaaaaaa-0000-0000-0000-000000000001') <> 12 then raise exception 'FAIL  장기재고 칸이 더해지지 않았다'; end if;
+  raise notice '  OK   예전 설정 행에 장기재고 기준(원자재 12·제품 6) 칸이 더해진다';
 end $t$;
 \else
 -- 준비: 예전 판에 일 단위 설정과 자료를 넣어 둔다

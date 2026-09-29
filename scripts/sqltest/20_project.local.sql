@@ -58,7 +58,7 @@ begin
   perform public._assert(v_bad is null, '두 번 적용 후 표마다 정책 4개 (발견: ' || coalesce(v_bad, '없음') || ')');
   perform public._assert_eq(
     (select count(*) from pg_trigger where tgname like '%\_updated\_at' and not tgisinternal),
-    7::bigint, '두 번 적용 후 updated_at 트리거 7개');
+    8::bigint, '두 번 적용 후 updated_at 트리거 8개');
 end $t$;
 
 do $t$ begin raise notice '[프로젝트] 함수 권한(proacl)'; end $t$;
@@ -113,6 +113,9 @@ begin
   insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'raw', '하우징류', '고친 메모')
     on conflict (owner_id, memo_key, kind, group_name) do update set memo = excluded.memo;
   perform public._assert_eq((select memo from public.cause_memo), '고친 메모'::text, 'cause_memo upsert 가 덮어쓴다(한 행)');
+  insert into public.dead_confirm (kind, code) values ('raw', 'RM-1') on conflict (owner_id, kind, code) do nothing;
+  perform public._assert_eq((select long_raw_months || '/' || long_prod_months || '/' || aging_max_months || '/' || over_enabled from public.app_settings),
+    '12/6/12/false'::text, '장기재고 처음 값 원자재 12 · 제품 6 · 분포 12 · 과잉 끔');
   perform public._assert_eq((select agg from (select string_agg(aging_months || '/' || over_months || '/' || dead_months, '') as agg from public.app_settings) q),
     '3, 6, 12/6/12'::text, '새로 만든 기준 설정은 개월 처음 값 3, 6, 12 / 6 / 12');
 
@@ -138,7 +141,7 @@ set request.jwt.claim.sub = 'bbbbbbbb-0000-0000-0000-000000000002';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
     perform public._assert_rows(format('update public.%I set updated_at = now()', t), 0, 'B 는 A 의 ' || t || ' 를 못 고친다');
@@ -176,7 +179,7 @@ set request.jwt.claim.sub = '';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -209,8 +212,12 @@ begin
     '23514', '없는 자리 이름(slot_id)은 CHECK 가 막는다');
   perform public._assert_raises(format('insert into public.column_mapping (owner_id, def_key) values (%L, %L)', a, 'unknown'),
     '23514', '없는 자료 종류(def_key)는 CHECK 가 막는다');
-  perform public._assert_raises(format('insert into public.app_settings (owner_id, over_months, dead_months) values (%L, 13, 12)', gen_random_uuid()),
-    '23514', '불용 기준(개월) < 과잉 기준(개월)은 CHECK 가 막는다');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, long_raw_months) values (%L, 0)', gen_random_uuid()),
+    '23514', '장기재고 기준은 1개월 이상');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, aging_max_months) values (%L, 37)', gen_random_uuid()),
+    '23514', '개월별 분포 최대는 36개월까지');
+  perform public._assert_raises(format('insert into public.dead_confirm (owner_id, kind, code) values (%L, %L, %L)', a, 'raw', 'RM-1'),
+    '23505', '불용 확정은 품목마다 한 행');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, aging_months) values (%L, %L)', gen_random_uuid(), '3, 6.5'),
     '23514', 'Aging 구간은 정수 개월만');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, plant_view) values (%L, %L)', gen_random_uuid(), '중국'),
