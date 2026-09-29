@@ -45,9 +45,15 @@
     // 올린 자료(짝지은 뒤의 레코드). 자리마다 { parts: [파일별 자료] }
     getData: function () { return getJson('data', {}); },
     setData: function (d) { return set('data', JSON.stringify(d)); },
-    clearData: function () { del('data'); },
+    clearData: function () { del('data'); del('sales'); },
+    // 판매현황(출고) 파일별 요약 [{ fileName, … , byCode }] — 커서 자료와 따로 저장합니다(가득 차도 재고 자료는 남게)
+    getSales: function () { return getJson('sales', []); },
+    setSales: function (list) { return set('sales', JSON.stringify(list)); },
+    // 보고서 대조 차이 중 「확인함」으로 표시한 것 { 키: true }
+    getReconAck: function () { return getJson('reconAck', {}); },
+    setReconAck: function (a) { return set('reconAck', JSON.stringify(a)); },
     clearAll: function () {
-      ['data', 'settings', 'map.rawStock', 'map.productStock', 'map.inbound', 'map.outbound', 'map.price'].forEach(del);
+      ['data', 'sales', 'reconAck', 'settings', 'map.rawStock', 'map.semiStock', 'map.productStock', 'map.inbound', 'map.outbound', 'map.price'].forEach(del);
     },
     available: function () { get('settings'); return ok; }
   };

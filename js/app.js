@@ -1,13 +1,16 @@
 /*
  * 화면 — 해시 주소로 나눕니다.
- *   #/data        자료 올리기 · 컬럼 짝짓기 (7개 자리, 자리마다 공장별 파일 여러 개)
+ *   #/data        자료 올리기 · 컬럼 짝짓기 (9개 자리, 자리마다 공장별 파일 여러 개)
+ *                 + 판매현황(출고) 여러 파일 한 번에(진행률, 작업자 스레드) + 회사 보고서(대조용)
  *   #/settings    기준 설정 (기준일, 장기재고 기준 개월, 개월별 분포 최대, 대분류 묶음표, 관리대상 기준)
  *   #/raw         원자재 분석 (공장별 요약, 대분류별 증감, Aging 개월별 분포, 정상·장기재고, 품목별·불용 확정)
+ *   #/semi        반제품 분석 (고객사별 — 제품과 같은 화면)
  *   #/product     제품 분석 (고객사별 증감, Aging 개월별 분포, 정상·장기재고, 품목별·불용 확정)
  *   #/cause       증감 원인 (대분류 금액 증감 분해, 기여 상위 품목, 원인 메모, AI 해설 프롬프트)
  *                 #/cause/product 는 제품(고객사별)
  *   #/targets     관리대상 후보
  *   #/unmatched   단가 미매칭 목록
+ *   #/recon       보고서 대조 · 차이 알람 (차이가 있으면 모든 화면 위에 경고 띠)
  * 분석 화면 위의 「공장 보기」(합계·인천·대구)는 모든 분석 화면과 엑셀에 함께 적용됩니다.
  */
 (function () {
@@ -17,15 +20,23 @@
   // 올린 자료 { slotId: { parts: [{ fileName, sheetName, plant, sample, rowCount, records, problems, mapping }] } }
   // 예전(자리마다 파일 하나) 형식으로 저장된 자료는 여기서 새 형식으로 바꿉니다.
   var data = L.migrateSlotData(S.getData());
+  var sales = S.getSales();          // 판매현황(출고) 파일별 요약 — 재고 자료와 따로 저장
   // 기준 — 예전 「일」 단위(90·180·365일 등)로 저장된 설정은 「개월」로 자동 변환합니다.
   var mig = L.migrateSettings(S.getSettingsRaw(), L.defaultSettings());
   var settings = mig.settings;
-  if (mig.migrated) {
+  if (mig.migrated || mig.round3) {
     S.setSettings(settings);
-    setTimeout(function () { toast('Aging 기준이 바뀌었습니다: 개월별 분포(0·1·2…개월)로 보이고, 원자재 ' + settings.longRawMonths + '개월 이상·제품 ' + settings.longProdMonths + '개월 이상을 장기재고로 봅니다. 불용은 품목마다 「불용 확정」으로 체크합니다. 「기준 설정」에서 확인해 주세요.'); }, 300);
+    setTimeout(function () {
+      toast(mig.round3
+        ? '기준이 바뀌었습니다(9/29 답변): 원자재는 ' + L.longLabel(settings.longRawMonths, settings.longRawOp) + ', 반제품·제품은 ' + L.longLabel(settings.longProdMonths, settings.longProdOp) + '을 장기재고로 보고, 개월별 분포는 0~' + settings.agingMaxMonths + '개월 + 「' + L.overLabel(settings.agingMaxMonths) + '」으로 보입니다. 「기준 설정」에서 확인해 주세요.'
+        : 'Aging 기준이 바뀌었습니다: 개월별 분포(0·1·2…개월)로 보이고, 불용은 품목마다 「불용 확정」으로 체크합니다. 「기준 설정」에서 확인해 주세요.');
+    }, 300);
   }
   var pending = {};                 // 올렸지만 아직 짝을 확정하지 않은 파일 { slotId: {...} }
-  var itemFilter = { raw: {}, product: {} };
+  var itemFilter = { raw: {}, semi: {}, product: {} };
+  var KIND_TEXT = { raw: '원자재', semi: '반제품', product: '제품' };
+  var KIND_SLOT = { raw: ['rawCur', 'rawPrev'], semi: ['semiCur', 'semiPrev'], product: ['prodCur', 'prodPrev'] };
+  var salesJob = null;               // 판매현황 읽는 중 상태 { total, done, name, started, el }
   var MAX_ROWS = 300;
   var PLANT_IDS = L.PLANTS.map(function (p) { return p.id; });
 
@@ -75,7 +86,7 @@
   function sign(n) { return n > 0 ? 'up' : n < 0 ? 'down' : ''; }
   function parts(slotId) { return data[slotId] && data[slotId].parts ? data[slotId].parts : []; }
   function isSample() {
-    return Object.keys(data).some(function (k) { return parts(k).some(function (p) { return p.sample; }); });
+    return Object.keys(data).some(function (k) { return parts(k).some(function (p) { return p.sample; }); }) || sales.some(function (f) { return f.sample; });
   }
   function persist() {
     if (!S.setData(data)) toast('브라우저 저장 공간이 부족해 자료를 이번 창에서만 유지합니다. 새로 고치면 다시 올려 주세요.', true);
@@ -89,10 +100,14 @@
   function currentData() {
     var o = {};
     L.SLOTS.forEach(function (s) { o[s.id] = records(s.id); });
+    o.sales = sales;
+    o.report = data.report && data.report.parts ? data.report.parts : [];
     return o;
   }
-  function result() { return L.analyze(currentData(), settings, { dead: S.getDead() }); }
-  function hasStock() { return ['rawCur', 'prodCur'].some(function (k) { return parts(k).length; }); }
+  // 한 번 그리는 동안 분석은 한 번만(경고 띠·화면이 같은 결과를 씁니다). render() 가 비웁니다.
+  var cachedRes = null;
+  function result() { return cachedRes || (cachedRes = L.analyze(currentData(), settings, { dead: S.getDead(), reconAck: S.getReconAck() })); }
+  function hasStock() { return ['rawCur', 'semiCur', 'prodCur'].some(function (k) { return parts(k).length; }); }
   function plantText() { return settings.plantView ? settings.plantView + ' 공장' : '인천+대구 합계'; }
   function memoKey() { return (settings.curDate || '기준일없음') + '.' + (settings.plantView || 'all'); }
 
@@ -103,7 +118,7 @@
   }
 
   // ── 머리 ─────────────────────────────────────────────────
-  var NAV = [['data', '자료'], ['settings', '기준 설정'], ['raw', '원자재 분석'], ['product', '제품 분석'], ['cause', '증감 원인'], ['targets', '관리대상'], ['unmatched', '단가 미매칭']];
+  var NAV = [['data', '자료'], ['settings', '기준 설정'], ['raw', '원자재 분석'], ['semi', '반제품 분석'], ['product', '제품 분석'], ['cause', '증감 원인'], ['targets', '관리대상'], ['unmatched', '단가 미매칭'], ['recon', '대조·알람']];
   function renderHeader(route) {
     var nav = document.getElementById('nav');
     nav.textContent = '';
@@ -111,6 +126,14 @@
       nav.appendChild(h('a', { href: '#/' + it[0], 'aria-current': route === it[0] ? 'page' : null }, it[1]));
     });
     document.getElementById('sampleBanner').hidden = !isSample();
+    // 차이 알람 띠 — 회사 보고서를 올렸고, 합계 줄 차이 중 「확인함」으로 표시하지 않은 것이 있을 때
+    var ab = document.getElementById('alarmBanner');
+    ab.textContent = '';
+    var res = hasStock() ? result() : null;
+    var n = res && res.ok && res.recon ? res.recon.alarms.length : 0;
+    ab.hidden = !n;
+    if (n) ab.appendChild(h('span', null, '보고서 대조 차이 ' + n + '건 — 회사 보고서의 합계와 도구 계산이 다릅니다. ',
+      route === 'recon' ? '아래 표를 확인해 주세요.' : h('a', { href: '#/recon' }, '대조·알람 화면에서 확인해 주세요')));
   }
 
   document.getElementById('exportBtn').addEventListener('click', exportExcel);
@@ -118,17 +141,22 @@
     if (!hasStock()) { toast('먼저 「자료」에서 당월 재고 파일을 올려 주세요.', true); location.hash = '#/data'; return; }
     var res = result();
     if (!res.ok) { toast(res.errors[0], true); location.hash = '#/settings'; return; }
-    var sheets = L.buildSheets(res, settings, isSample(), S.getMemos(memoKey()));
+    // 공장별 메모 — 보고용 「원자재」 시트의 공장 구역마다 그 공장 보기에서 적은 원인 메모를 씁니다
+    var byPlant = {};
+    [''].concat(PLANT_IDS).forEach(function (p) { byPlant[p] = S.getMemos((settings.curDate || '기준일없음') + '.' + (p || 'all')); });
+    var sheets = L.buildSheets(res, settings, isSample(), S.getMemos(memoKey()), byPlant);
     var wb = XLSX.utils.book_new();
     Object.keys(sheets).forEach(function (name) {
       var ws = XLSX.utils.aoa_to_sheet(sheets[name]);
-      ws['!cols'] = sheets[name][0].map(function (hd) { return { wch: Math.max(10, Math.min(40, String(hd).length * 2)) }; });
+      var width = [];
+      sheets[name].slice(0, 4).forEach(function (row) { row.forEach(function (hd, i) { width[i] = Math.max(width[i] || 10, Math.min(40, String(hd == null ? '' : hd).length * 2)); }); });
+      ws['!cols'] = width.map(function (w) { return { wch: w }; });
       XLSX.utils.book_append_sheet(wb, ws, name);
     });
     var out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     var name = (isSample() ? '예시데이터_' : '') + '재고분석_' + res.curDate + '_' + (settings.plantView || '합계') + '.xlsx';
     download(name, new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
-    toast(name + ' 파일을 내려받았습니다.');
+    toast(name + ' 파일을 내려받았습니다 — 앞 4개 시트(총괄·원자재·반제품·제품)가 보고용, 나머지는 백데이터입니다.');
   }
 
   // ── 파일 읽기 ─────────────────────────────────────────────
@@ -162,7 +190,7 @@
   // 자리의 달(당월 = 기준일의 달, 전월 = 그 앞 달). 재고 자리가 아니면 null
   function slotMonth(slotId) {
     var d = L.parseDate(settings.curDate);
-    if (!d || !/^(raw|prod)/.test(slotId)) return null;
+    if (!d || !/^(raw|semi|prod)/.test(slotId)) return null;
     var m = d.getMonth() + 1;
     return /Prev$/.test(slotId) ? (m === 1 ? 12 : m - 1) : m;
   }
@@ -176,7 +204,7 @@
   function preparePending(slot, fileName, book, sheetName, headerRow, sample, plant) {
     var sheetSure = true;
     if (!sheetName) {
-      if (/^(raw|prod)/.test(slot.id) && book.names.length > 1) {
+      if (/^(raw|semi|prod)/.test(slot.id) && book.names.length > 1) {
         var g = L.guessSheet(book.names, slot.id, slotMonth(slot.id));
         sheetName = g.name; sheetSure = g.sure;
       } else sheetName = book.names[0];
@@ -233,18 +261,28 @@
     var plan = Sample.build();
     data = {};
     pending = {};
+    // 판매현황(가상) 3개 — 실제 파일과 같은 흐름(scanSales)으로 읽습니다
+    var books = Sample.salesBooks();
+    sales = Object.keys(books).map(function (fn) { var f = L.scanSales(books[fn]['판매현황내역'], { fileName: fn, sheetName: '판매현황내역' }); f.sample = true; return f; });
+    S.setSales(sales);
+    // 회사 보고서(대조용) — 예시 재고분석 통합문서 두 개의 보고용 시트
+    var wbs = Sample.workbooks();
+    data.report = { parts: Sample.REPORT_FILES.map(function (fn) {
+      var r = L.parseReportBook({ names: Object.keys(wbs[fn]), sheets: wbs[fn] }, { fileName: fn, filePlant: L.plantFromFileName(fn) });
+      r.sample = true; return r;
+    }) };
     settings.curDate = Sample.CUR;
     settings.prevDate = Sample.PREV;
     settings.plantView = '';
     L.SLOTS.forEach(function (slot) {
-      plan[slot.id].forEach(function (part) {
+      (plan[slot.id] || []).forEach(function (part) {
         var book = { names: part.names, sheets: part.sheets };
         preparePending(slot, part.fileName, book, part.sheetName, null, true);
         confirmSlot(slot);
       });
     });
     saveSettings();
-    toast('예시 데이터(가상)를 불러왔습니다 — 인천·대구 두 공장, 7월·8월. 기준일은 ' + Sample.CUR + ' 입니다.');
+    toast('예시 데이터(가상)를 불러왔습니다 — 인천·대구 두 공장, 7월·8월, 원자재·반제품·제품, 판매현황 3개, 보고서 대조용 파일. 기준일은 ' + Sample.CUR + ' 입니다.');
     render();
   }
 
@@ -260,18 +298,21 @@
           h('button', { type: 'button', class: 'btn', onclick: loadSample }, '예시 데이터 불러오기'),
           h('button', { type: 'button', class: 'btn btn-danger', onclick: function () {
             if (!confirm('올린 자료를 모두 지웁니다. 기준 설정과 컬럼 짝은 남습니다. 계속할까요?')) return;
-            data = {}; pending = {}; S.clearData(); render(); toast('자료를 지웠습니다.');
+            data = {}; pending = {}; sales = []; S.clearData(); render(); toast('자료를 지웠습니다.');
           } }, '올린 자료 모두 지우기'),
           h('a', { class: 'btn', href: '#/settings' }, '다음: 기준 설정'))),
-      h('div', { class: 'slot-grid' }, L.SLOTS.map(slotCard)));
+      salesCard(),
+      h('div', { class: 'slot-grid' }, L.SLOTS.map(slotCard)),
+      reportCard());
     return wrap;
   }
 
   var SLOT_HELP = {
     rawCur: '품번·재고수량 필수. 대분류·금액(또는 단가)·경과 개월(재고잔량분석) 칸이 있으면 함께 씁니다',
     rawPrev: '당월과 같은 형식. 없으면 모두 「신규」로 봅니다',
+    semiCur: '품목코드·고객사·재고수량. 금액은 「합계금액」(인천) 또는 「재고*반제품단가」(대구) 칸을 먼저 씁니다', semiPrev: '당월과 같은 형식',
     prodCur: '제품코드·고객사·재고수량', prodPrev: '당월과 같은 형식',
-    inbound: '품번·입고일(·수량) — 입고일 기준 Aging, 증감 원인의 「입고」', outbound: '출고현황(품번·최근 출고일) 또는 출고 내역(품번·출고일·수량) — 최근 출고일 기준 Aging, 회전율, 증감 원인의 「출고·사용」. 없으면 Aging 은 재고 파일의 재고잔량분석 칸으로 대체',
+    inbound: '품번·입고일(·수량) — 입고일 기준 Aging, 증감 원인의 「입고」', outbound: '출고현황(품번·최근 출고일) 또는 출고 내역(품번·출고일·수량)을 파일 하나로 올릴 때. 월별 판매현황 여러 개는 위의 「판매현황(출고) 여러 파일」에 한 번에 올려 주세요',
     price: '품번·단가(·적용일·품명·대분류) — 재고 파일에 금액이 없을 때 금액 산출, 대분류가 빈 품목 채우기'
   };
 
@@ -288,7 +329,7 @@
         if (err) { toast(err.message, true); return; }
         var pp = preparePending(slot, f.name, book, null, null, false);
         fillDateFromBook(slot, book, pp.sheetName);
-        if (settings.curDate && /^(raw|prod)/.test(slot.id) && !pp.sheetSure && book.names.length > 1) preparePending(slot, f.name, book, null, null, false);
+        if (settings.curDate && /^(raw|semi|prod)/.test(slot.id) && !pp.sheetSure && book.names.length > 1) preparePending(slot, f.name, book, null, null, false);
         render();
       });
     });
@@ -376,8 +417,192 @@
     return box;
   }
 
+  // ── 판매현황(출고) 여러 파일 ─────────────────────────────
+  // 월별 판매현황 파일을 한꺼번에 골라 올립니다. 파일마다 머리행·열 짝을 따로 짐작하고(달마다 열이 달라도 됨),
+  // 품목코드·출고일·수량(·공장) 칸만 읽어 「품목별 달별 출고수량 + 그 달 마지막 출고일」만 남깁니다.
+  // 온라인(https)·간이 서버(http)에서는 작업자 스레드에서 읽어 화면이 멈추지 않고, 파일(file://)로 열었으면
+  // 브라우저가 작업자 스레드를 막으므로 파일 사이사이 쉬어 가며 읽습니다(파일 하나를 읽는 동안은 잠깐 멈춥니다).
+  function salesCard() {
+    var card = h('section', { class: 'card sales-card', 'data-slot': 'sales' },
+      h('h2', null, '판매현황(출고) 여러 파일 — 최근 출고일'),
+      h('p', { class: 'note' }, '월별 판매현황 파일(예: 판매현황(25.01)~(26.09))을 한 번에 여러 개 골라 올려 주세요. 품목코드·판매일자·수량 칸만 읽어 품목별 최근 출고일을 구하고, 기준일 이전 가장 최근 출고일로 Aging 을 다시 계산합니다. 출고 이력이 없는 품목은 예전처럼 재고잔량분석 칸을 씁니다.'),
+      h('p', { class: 'note' }, '같은 이름의 파일을 다시 올리면 바꿔 넣습니다. 파일은 외부로 보내지 않습니다.'));
+    var input = h('input', { type: 'file', multiple: true, accept: '.xlsx,.xls,.csv', 'aria-label': '판매현황 파일 여러 개 선택' });
+    input.addEventListener('change', function () { var fs = [].slice.call(input.files || []); if (fs.length) loadSalesFiles(fs); });
+    if (salesJob) {
+      var bar = h('progress', { max: String(salesJob.total), value: String(salesJob.done), class: 'sales-progress' });
+      var txt = h('p', { class: 'note', 'aria-live': 'polite' }, salesProgressText());
+      salesJob.el = { bar: bar, txt: txt };
+      card.appendChild(h('div', { class: 'progress-box' }, bar, txt));
+      return card;
+    }
+    card.appendChild(h('div', { class: 'btn-row' },
+      h('label', { class: 'btn btn-primary file-btn' }, sales.length ? '판매현황 파일 더 올리기 · 바꾸기' : '판매현황 파일 여러 개 선택', input),
+      sales.length ? h('button', { type: 'button', class: 'btn', onclick: function () {
+        if (!confirm('올린 판매현황 ' + sales.length + '개를 모두 뺍니다. 계속할까요?')) return;
+        sales = []; S.setSales(sales); render(); toast('판매현황을 모두 뺐습니다.');
+      } }, '판매현황 모두 빼기') : null));
+    if (!sales.length) return card;
+    var diff = L.salesHeaderDiff(sales);
+    var codes = L.salesIndex(sales).codeCount;
+    var first = sales.reduce(function (a, f) { return !a || (f.minDate && f.minDate < a) ? f.minDate : a; }, '');
+    var last = sales.reduce(function (a, f) { return f.maxDate > a ? f.maxDate : a; }, '');
+    card.appendChild(h('p', null, h('strong', null, '판매현황 ' + sales.length + '개'), ' · 출고일 ' + first + ' ~ ' + last + ' · 출고된 품목 ' + fmt(codes) + '개'));
+    if (hasStock() && settings.curDate) {
+      var res = result();
+      if (res.ok) {
+        var cov = res.salesCoverage;
+        card.appendChild(h('p', { class: 'note' }, '당월 재고 품목 중 기준일(' + res.curDate + ') 이전 최근 출고일을 찾은 품목 — ' + L.KINDS.map(function (k) {
+          var c = cov[k];
+          return KIND_TEXT[k] + ' ' + (c.used ? fmt(c.withSale) + ' / ' + fmt(c.stock) : '적용 안 함(기준 설정)');
+        }).join(' · ')));
+      }
+    }
+    var partial = sales.filter(function (f) { return f.partial; });
+    if (partial.length) card.appendChild(h('p', { class: 'alert info' }, partial.map(function (f) { return f.fileName; }).join(', ') + ' — 제목 기간(' + partial[0].titleTo + '까지)보다 앞선 ' + partial[0].stampDate + ' 에 내려받은 파일이라 그 뒤 출고는 아직 없습니다(월 중간분).'));
+    if (diff.length) card.appendChild(h('div', { class: 'alert info' }, h('p', null, '열 구성이 다른 파일이 있습니다 — 파일마다 짝을 따로 잡아 읽었습니다.'),
+      h('ul', null, diff.map(function (d) {
+        return h('li', null, d.fileName + ': ' + [d.missing.length ? '없어진 열 ' + d.missing.join(', ') : '', d.added.length ? '새 열 ' + d.added.join(', ') : '',
+          d.mappingChanged.length ? '짝 바뀜 ' + d.mappingChanged.join(', ') : '', d.moved ? '순서 바뀐 열 ' + d.moved + '개' : ''].filter(Boolean).join(' · '));
+      }))));
+    var bad = sales.filter(function (f) { return f.missing && f.missing.length; });
+    if (bad.length) card.appendChild(h('p', { class: 'alert warn' }, '품목코드·출고일 칸을 찾지 못한 파일: ' + bad.map(function (f) { return f.fileName; }).join(', ')));
+    var list = sales.slice().sort(function (a, b) { return (a.minDate || '') < (b.minDate || '') ? -1 : 1; });
+    card.appendChild(h('details', null, h('summary', null, '파일별 읽은 결과'),
+      table(['파일', '제목 기간', n('첫 출고일'), n('마지막 출고일'), n('읽은 행'), n('사용 행'), n('품목 수'), '짝(품목코드·출고일·수량)', '비고', ''], list.map(function (f) {
+        return h('tr', null, td(f.fileName), td((f.titleFrom || '') + (f.titleTo ? ' ~ ' + f.titleTo : ''), 'nowrap'), td(f.minDate, 'nowrap'), td(f.maxDate, 'nowrap'),
+          td(fmt(f.rowCount), 'num'), td(fmt(f.used), 'num'), td(fmt(f.codeCount), 'num'),
+          td([f.mapping.code, f.mapping.date, f.mapping.qty].map(function (x) { return x || '(없음)'; }).join(' · ')),
+          td([f.partial ? '월 중간분' : '', f.plantColumn ? '공장 칸 있음' : '', f.readMs != null ? (f.readMs / 1000).toFixed(1) + '초' : ''].filter(Boolean).join(' · ')),
+          td(h('button', { type: 'button', class: 'btn', onclick: function () { sales = sales.filter(function (x) { return x !== f; }); S.setSales(sales); render(); } }, '빼기')));
+      }), { cls: 'wide' })));
+    return card;
+  }
+  function salesProgressText() {
+    var j = salesJob;
+    var sec = ((Date.now() - j.started) / 1000).toFixed(1);
+    return j.done + ' / ' + j.total + ' 파일 읽음' + (j.name ? ' · ' + j.name + ' 읽는 중' : '') + ' · ' + sec + '초' + (j.mode ? ' · ' + j.mode : '');
+  }
+  function updateSalesProgress() {
+    if (!salesJob || !salesJob.el) return;
+    salesJob.el.bar.value = salesJob.done;
+    salesJob.el.txt.textContent = salesProgressText();
+  }
+  function readBuffer(file) {
+    return new Promise(function (resolve, reject) {
+      var fr = new FileReader();
+      fr.onerror = function () { reject(new Error(file.name + ' 파일을 읽지 못했습니다.')); };
+      fr.onload = function () { resolve(fr.result); };
+      fr.readAsArrayBuffer(file);
+    });
+  }
+  // 작업자 스레드 — file:// 에서는 만들 때 막히거나(SecurityError) 곧바로 오류가 나므로 그때는 null
+  function makeWorker() {
+    if (location.protocol === 'file:' || typeof Worker === 'undefined') return null;
+    try { return new Worker('js/sales-worker.js'); } catch (e) { return null; }
+  }
+  function loadSalesFiles(files) {
+    var saved = S.getMapping('outbound');
+    salesJob = { total: files.length, done: 0, name: '', started: Date.now(), mode: '' };
+    render();
+    var worker = makeWorker();
+    var results = [], errors = [];
+    var seq = 0, waiting = {};
+    if (worker) {
+      salesJob.mode = '작업자 스레드';
+      worker.onmessage = function (e) { var w = waiting[e.data.id]; delete waiting[e.data.id]; if (w) (e.data.ok ? w.resolve(e.data.file) : w.reject(new Error(e.data.error))); };
+      worker.onerror = function (e) { e.preventDefault && e.preventDefault(); Object.keys(waiting).forEach(function (k) { waiting[k].reject(new Error('worker')); delete waiting[k]; }); worker = null; };
+    } else salesJob.mode = '화면에서 차례로 읽음(파일로 열었을 때)';
+    function parseOne(file, buf) {
+      if (worker) {
+        return new Promise(function (resolve, reject) {
+          var id = ++seq;
+          waiting[id] = { resolve: resolve, reject: reject };
+          worker.postMessage({ id: id, buf: buf, name: file.name, saved: saved }, [buf]);
+        }).catch(function (err) {
+          if (err.message !== 'worker') throw err;
+          // 작업자 스레드가 막혔으면 화면에서 다시 읽습니다
+          salesJob.mode = '화면에서 차례로 읽음';
+          return readBuffer(file).then(function (b2) { return parseMain(file, b2); });
+        });
+      }
+      return parseMain(file, buf);
+    }
+    function parseMain(file, buf) {
+      return new Promise(function (resolve, reject) {
+        setTimeout(function () {   // 진행률을 먼저 그리고 읽습니다
+          try { var t = Date.now(); var f = L.readSalesWorkbook(XLSX, new Uint8Array(buf), file.name, saved); f.readMs = Date.now() - t; resolve(f); }
+          catch (e) { reject(new Error(file.name + ': ' + e.message)); }
+        }, 30);
+      });
+    }
+    var i = 0;
+    function next() {
+      if (i >= files.length) return finish();
+      var file = files[i++];
+      salesJob.name = file.name; updateSalesProgress();
+      return readBuffer(file).then(function (buf) { return parseOne(file, buf); })
+        .then(function (f) { results.push(f); }, function (err) { errors.push(err.message); })
+        .then(function () { salesJob.done++; updateSalesProgress(); return next(); });
+    }
+    function finish() {
+      if (worker) worker.terminate();
+      var took = ((Date.now() - salesJob.started) / 1000).toFixed(1);
+      var names = results.map(function (f) { return f.fileName; });
+      sales = sales.filter(function (f) { return names.indexOf(f.fileName) < 0 && !f.sample; }).concat(results);
+      var okFile = results.filter(function (f) { return !f.missing.length; })[0];
+      if (okFile) S.setMapping('outbound', okFile.mapping);
+      salesJob = null;
+      var stored = S.setSales(sales);
+      render();
+      toast('판매현황 ' + results.length + '개를 ' + took + '초에 읽었습니다' + (errors.length ? ' — 읽지 못한 파일 ' + errors.length + '개: ' + errors[0] : '.') + (stored ? '' : ' 브라우저 저장 공간이 부족해 이번 창에서만 유지합니다.'), !!errors.length || !stored);
+    }
+    next();
+  }
+
+  // ── 회사 보고서(대조용) ───────────────────────────────────
+  // 회사가 쓰는 월간 재고분석 통합문서(보고용 「원자재」「반제품」「제품」 시트가 든 파일)를 올리면
+  // 공장·구분·달별 합계를 도구 계산과 맞대 차이를 알람으로 보입니다. 파일 전체가 아니라 보고용 시트의 표만 저장합니다.
+  function reportCard() {
+    var list = data.report && data.report.parts ? data.report.parts : [];
+    var card = h('section', { class: 'card', 'data-slot': 'report' },
+      h('h2', null, '회사 보고서(대조용, 선택) — 차이 알람'),
+      h('p', { class: 'note' }, '매달 쓰시는 월간 재고분석 파일(「총괄·원자재·반제품·제품」 시트가 든 통합문서)을 올리면, 보고용 시트의 공장별 합계(수량·금액, 전월·당월)를 도구 계산과 맞대 봅니다. 차이가 있으면 모든 화면 위에 경고 띠가 뜨고 「대조·알람」 화면과 엑셀 「총괄」 시트 아래에 나옵니다.'));
+    var input = h('input', { type: 'file', accept: '.xlsx,.xls', 'aria-label': '회사 보고서 파일 선택' });
+    input.addEventListener('change', function () {
+      var f = input.files[0];
+      if (!f) return;
+      readFile(f, function (err, book) {
+        if (err) { toast(err.message, true); return; }
+        var r = L.parseReportBook(book, { fileName: f.name, filePlant: L.plantFromFileName(f.name) });
+        if (!r.sections.length) { toast('보고용 시트(원자재·반제품·제품)에서 「재고현황(MM월)」 머리행을 찾지 못했습니다.', true); return; }
+        data.report = { parts: list.filter(function (x) { return x.fileName !== f.name && !x.sample; }).concat([r]) };
+        persist(); render();
+        toast(f.name + ' — 보고용 구역 ' + r.sections.length + '개를 읽었습니다.');
+      });
+    });
+    if (list.length) card.appendChild(h('ul', { class: 'part-list' }, list.map(function (r) {
+      return h('li', null, h('span', { class: 'ok-badge' }, '적용됨'), h('span', { class: 'part-name' }, r.fileName),
+        h('span', { class: 'note' }, r.sections.map(function (x) { return x.sheet + (x.name ? '·' + x.name : ''); }).join(', ')),
+        h('button', { type: 'button', class: 'btn', onclick: function () {
+          data.report = { parts: list.filter(function (x) { return x !== r; }) };
+          if (!data.report.parts.length) delete data.report;
+          persist(); render();
+        } }, '빼기'));
+    })));
+    card.appendChild(h('div', { class: 'btn-row' }, h('label', { class: 'btn file-btn' }, list.length ? '보고서 파일 더 올리기' : '보고서 파일 선택', input)));
+    return card;
+  }
+
   // ── 기준 설정 ─────────────────────────────────────────────
   function viewSettings() {
+    function opSelect(name, label, hint) {
+      return h('label', { class: 'field', 'data-field': name }, h('span', null, label),
+        h('select', { name: name },
+          h('option', { value: 'gt', selected: settings[name] === 'gt' }, '초과 (기준 개월보다 많으면)'),
+          h('option', { value: 'ge', selected: settings[name] !== 'gt' }, '이상 (기준 개월부터)')),
+        hint ? h('small', { class: 'note' }, hint) : null);
+    }
     function num(name, label, hint) {
       return h('label', { class: 'field', 'data-field': name }, h('span', null, label),
         h('input', { name: name, inputmode: 'decimal', value: String(settings[name] == null ? '' : settings[name]) }),
@@ -392,13 +617,25 @@
           h('small', { class: 'note' }, '비우면 당월 기준일의 전월 말일. 전월 단가 적용과 당월 입·출고 수량(회전율·증감 원인) 기간에 씁니다.'))),
       h('h2', null, 'Aging · 정상/장기재고 (개월)'),
       h('div', { class: 'alert info' },
-        h('p', null, 'Aging 은 현재고의 최근 출고일부터 기준일까지 경과 개월입니다. 출고현황(최근 출고일)을 올리지 않았거나 출고일이 없는 품목은 재고 파일의 「재고잔량분석」 칸으로 대체합니다. 둘 다 없으면 아래 설정에 따라 최근 입고일로 대신합니다.'),
-        h('p', null, '경과 개월 = 기준일과 날짜의 달력 월 차이입니다. 기준일의 「일」이 날짜의 「일」보다 작으면 한 달이 덜 찬 것으로 1을 빼고, 기준일이 그 달 말일이면 빼지 않습니다. 파일의 「12 개월초과」는 13개월로 봅니다.'),
-        h('p', null, '판정: 세부는 Aging 으로 「정상 / 장기재고」, 총괄은 「정상 / 불용」 2단계입니다. 불용은 관련부서 확정 후 품목별로 「불용 확정」을 체크해 주세요(도구가 판정하지 않습니다).')),
+        h('p', null, 'Aging 은 현재고의 최근 출고일부터 기준일까지 경과 개월입니다. 판매현황(출고)을 올리면 품목별 최근 출고일로 계산하고, 출고 이력이 없는 품목은 재고 파일의 「재고잔량분석」 칸으로 대체합니다. 둘 다 없으면 아래 설정에 따라 최근 입고일로 대신합니다. 품목마다 어느 기준으로 계산했는지 분석 화면에 표시합니다.'),
+        h('p', null, '경과 개월 = 기준일과 날짜의 달력 월 차이입니다. 기준일의 「일」이 날짜의 「일」보다 작으면 한 달이 덜 찬 것으로 1을 빼고, 기준일이 그 달 말일이면 빼지 않습니다. 파일의 「12 개월초과」는 정확한 개월을 몰라 「12개월 초과(개월 미상)」 칸에 따로 둡니다.'),
+        h('p', null, '판정: 세부는 Aging 으로 「정상 / 장기재고」, 총괄은 「정상 / 불용」 2단계입니다. 원자재는 12개월 「초과」, 반제품·제품은 6개월 「이상」이 처음 값입니다(9/29 답변). 불용은 관련부서 확정 후 품목별로 「불용 확정」을 체크해 주세요(도구가 판정하지 않습니다).')),
       h('div', { class: 'form-grid' },
-        num('longRawMonths', '원자재 장기재고 — 경과 개월이 이 값 이상이면', '처음 값 12. 24개월로 바꿀 때 여기만 고치면 됩니다'),
-        num('longProdMonths', '제품 장기재고 — 경과 개월이 이 값 이상이면', '처음 값 6'),
-        num('agingMaxMonths', '개월별 분포 — 몇 개월까지 한 칸씩 보일지', '처음 값 12 → 0~12개월 + 「13개월 이상」. 최대 36'),
+        num('longRawMonths', '원자재 장기재고 기준 개월', '처음 값 12. 24개월로 바꿀 때 여기만 고치면 됩니다'),
+        opSelect('longRawOp', '원자재 — 기준 개월을', '처음 값 「초과」: 12개월이면 13개월부터 장기재고'),
+        num('longProdMonths', '반제품·제품 장기재고 기준 개월', '처음 값 6'),
+        opSelect('longProdOp', '반제품·제품 — 기준 개월을', '처음 값 「이상」: 6개월부터 장기재고'),
+        num('agingMaxMonths', '개월별 분포 — 몇 개월까지 한 칸씩 보일지', '처음 값 36 → 0~36개월 + 「36개월 초과」. 1~36'),
+        h('label', { class: 'field' }, h('span', null, 'Aging 경로'),
+          h('select', { name: 'agingPath' },
+            h('option', { value: 'out', selected: settings.agingPath !== 'file' }, '최근 출고일 기준 (판매현황·출고 이력 → 없으면 재고잔량분석 칸)'),
+            h('option', { value: 'file', selected: settings.agingPath === 'file' }, '예전 경로 (재고잔량분석 칸 → 없으면 최근 출고일)')),
+          h('small', { class: 'note' }, '분석 화면의 「기준 비교」 표에 다른 경로로 계산한 분포가 함께 나옵니다.')),
+        h('label', { class: 'field' }, h('span', null, '판매현황 최근 출고일을 쓸 대상'),
+          h('select', { name: 'salesScope' },
+            h('option', { value: 'prod', selected: settings.salesScope !== 'all' }, '반제품·제품만 (원자재는 재고잔량분석 칸)'),
+            h('option', { value: 'all', selected: settings.salesScope === 'all' }, '원자재·반제품·제품 모두')),
+          h('small', { class: 'note' }, '원자재는 판매가 아니라 생산에 투입되므로 판매현황에는 유상사급 판매분만 나옵니다. 그래서 처음 값은 반제품·제품만입니다.')),
         h('label', { class: 'field' }, h('span', null, '출고 이력도 경과 개월 칸도 없는 품목'),
           h('select', { name: 'noOutPolicy' },
             h('option', { value: 'inbound', selected: settings.noOutPolicy !== 'none' }, '최근 입고일로 대신 계산'),
@@ -408,6 +645,12 @@
             h('option', { value: '', selected: settings.overEnabled !== 'on' }, '쓰지 않음 (정상 / 장기재고만)'),
             h('option', { value: 'on', selected: settings.overEnabled === 'on' }, '씀 — 아래 개월을 넘고 장기재고 미만이면 「과잉」'))),
         num('overMonths', '과잉 기준 — 경과 개월이 이 값을 넘으면(과잉 구간을 쓸 때만)', '정수')),
+      h('h2', null, '보고서 대조 · 차이 알람'),
+      h('p', { class: 'note' }, '「자료」의 「회사 보고서(대조용)」에 월간 재고분석 파일을 올리면 보고용 시트의 공장별 합계와 도구 계산을 맞대 봅니다.'),
+      h('div', { class: 'form-grid' },
+        num('reconTolerance', '허용 차이(원) — 이 금액 이하 차이는 알람 없음', '처음 값 1원. 수량은 0.5 이하 차이(소수 수량 반올림)를 뺍니다'),
+        h('label', { class: 'field' }, h('span', null, '보고서 구역 이름 → 공장'), h('textarea', { name: 'plantAlias', rows: '3', placeholder: '예: ○○EO=대구' }, settings.plantAlias || ''),
+          h('small', { class: 'note' }, '보고용 시트의 「○○기준」 구역 이름에 인천·본사·대구가 없으면 한 줄에 「구역이름=대구」처럼 적어 주세요. 회사 고유 이름이라 처음 값은 비어 있고, 이 브라우저에만 저장됩니다.'))),
       h('h2', null, '원자재 대분류 묶음표'),
       h('p', { class: 'note' }, 'ERP 대분류 코드를 보고서 대분류로 묶습니다. 한 줄에 「코드=보고서 대분류」. 품번으로 묶으려면 「품번:CI184-*=파크라케이블(CI184)」처럼 적습니다(품번 규칙이 먼저). 비우면 파일에 적힌 대분류 그대로 씁니다.'),
       h('div', { class: 'form-grid' },
@@ -416,7 +659,7 @@
           h('select', { name: 'groupOthers' },
             h('option', { value: 'other', selected: settings.groupOthers !== 'keep' }, '「기타」로 모음 (보고서 방식)'),
             h('option', { value: 'keep', selected: settings.groupOthers === 'keep' }, '적힌 코드 그대로 보이기')),
-          h('small', { class: 'note' }, '처음 값은 두 공장 공통 통일안입니다(인천 요약표 기준 — 대구도 클립류·스위치를 따로 봅니다). 파크라케이블(CI184)은 인천 품목에만 적용합니다(「인천:품번:…」). 특정 품번만 넣으려면 「인천:품번:<품번>=파크라케이블(CI184)」 줄을 품번마다 적어 주세요.'))),
+          h('small', { class: 'note' }, '처음 값은 두 공장 공통 통일안입니다(인천 요약표 기준 — 대구도 클립류·스위치를 따로 봅니다). 파크라케이블(CI184)은 인천 품목의 CI184 품번 전체를 묶습니다(「인천:품번:CI184-*」 — 9/29 확정).'))),
       h('h2', null, '재고금액 · 관리대상 · 증감 원인'),
       h('div', { class: 'form-grid' },
         h('label', { class: 'field' }, h('span', null, '재고금액 산출'),
@@ -433,7 +676,7 @@
       var next = {};
       Object.keys(L.defaultSettings()).forEach(function (k) {
         var el = form.elements[k];
-        next[k] = el ? (k === 'groupMap' ? el.value : el.value.trim()) : settings[k];
+        next[k] = el ? (k === 'groupMap' || k === 'plantAlias' ? el.value : el.value.trim()) : settings[k];
       });
       var chk = L.checkSettings(next);
       var box = form.querySelector('#settingsErrors');
@@ -485,7 +728,7 @@
   }
   // 공장·달별로 자료가 빠진 곳 알림 (예: 인천 전월 원자재가 없으면 인천 품목이 모두 「신규」로 잡힘)
   function coverageNotes(kindKey) {
-    var cur = kindKey === 'raw' ? 'rawCur' : 'prodCur', prev = kindKey === 'raw' ? 'rawPrev' : 'prodPrev';
+    var cur = KIND_SLOT[kindKey][0], prev = KIND_SLOT[kindKey][1];
     var notes = [];
     function has(slot, plant) { return records(slot).some(function (r) { return r.plant === plant; }); }
     var plants = settings.plantView ? [settings.plantView] : PLANT_IDS;
@@ -498,10 +741,11 @@
     return notes;
   }
   function missingNotes(res, kindKey) {
-    var prevSlot = kindKey === 'raw' ? 'rawPrev' : 'prodPrev';
+    var prevSlot = KIND_SLOT[kindKey][1];
     var notes = coverageNotes(kindKey);
     if (!parts(prevSlot).length) notes.push('전월 재고가 없어 모든 품목을 「신규」로 봅니다.');
-    if (!res.hasHistory.outbound) notes.push('출고 이력이 없어 최근 출고일 기준 Aging 과 회전율은 계산하지 못합니다. 재고 파일의 경과 개월 칸이 있으면 그 값으로 Aging 을 표시합니다.');
+    if (!res.hasHistory.outbound && !res.hasHistory.sales) notes.push('판매현황(출고)을 올리지 않아 최근 출고일 기준 Aging 과 회전율은 계산하지 못합니다. 재고 파일의 경과 개월 칸(재고잔량분석)이 있으면 그 값으로 Aging 을 표시합니다.');
+    else if (res.hasHistory.sales && !res[kindKey].useSales) notes.push('판매현황 최근 출고일은 기준 설정에 따라 ' + KIND_TEXT[kindKey] + '에 쓰지 않습니다(재고잔량분석 칸 사용).');
     if (!res.hasHistory.inbound) notes.push('입고 이력이 없어 입고일 기준 Aging 을 계산하지 못합니다.');
     return notes.length ? h('div', { class: 'alert info' }, h('ul', null, notes.map(function (x) { return h('li', null, x); }))) : null;
   }
@@ -516,21 +760,22 @@
 
   function viewKind(kindKey) {
     var isRaw = kindKey === 'raw';
-    var title = isRaw ? '원자재 분석' : '제품 분석';
+    var kindText = KIND_TEXT[kindKey];
+    var title = kindText + ' 분석';
     var groupLabel = isRaw ? '대분류' : '고객사';
-    var codeLabel = isRaw ? '품번' : '제품코드';
+    var codeLabel = kindKey === 'product' ? '제품코드' : '품번';
     var wrap = h('div', null, h('div', { class: 'page-head' }, h('h1', null, title)));
     var nd = needData(); if (nd) { wrap.appendChild(nd); return wrap; }
     var res = result();
     var ns = needSettings(res); if (ns) { wrap.appendChild(ns); return wrap; }
     var k = res[kindKey];
-    var curSlot = isRaw ? 'rawCur' : 'prodCur';
+    var curSlot = KIND_SLOT[kindKey][0];
     wrap.appendChild(plantBar());
     if (!parts(curSlot).length) {
-      wrap.appendChild(h('div', { class: 'card' }, h('p', null, (isRaw ? '원자재' : '제품') + ' 당월 재고 파일을 아직 올리지 않았습니다.'), h('a', { class: 'btn btn-primary', href: '#/data' }, '자료 올리러 가기')));
+      wrap.appendChild(h('div', { class: 'card' }, h('p', null, kindText + ' 당월 재고 파일을 아직 올리지 않았습니다.'), h('a', { class: 'btn btn-primary', href: '#/data' }, '자료 올리러 가기')));
       return wrap;
     }
-    wrap.appendChild(h('p', { class: 'note' }, plantText() + ' · 기준일 ' + res.curDate + ' (전월 ' + res.prevDate + ') · Aging 은 개월 단위, 표시는 최근 출고일 기준(없으면 파일 경과 개월)'));
+    wrap.appendChild(h('p', { class: 'note' }, plantText() + ' · 기준일 ' + res.curDate + ' (전월 ' + res.prevDate + ') · Aging 은 개월 단위, ' + (res.agingPath === 'file' ? '재고잔량분석 칸 우선(예전 경로)' : '최근 출고일 기준(없으면 재고잔량분석 칸)') + ' · 장기재고 ' + k.longText));
     append(wrap, missingNotes(res, kindKey));
 
     var t = k.groups.total;
@@ -542,7 +787,7 @@
 
     if (!settings.plantView) {
       wrap.appendChild(h('h2', null, '공장별 요약'));
-      wrap.appendChild(plantSummaryTable(res, kindKey === 'raw' ? 'raw' : 'product'));
+      wrap.appendChild(plantSummaryTable(res, kindKey));
     }
 
     // 그룹별 증감
@@ -555,15 +800,15 @@
         td(fmtRate(g.prevAmt, g.curAmt, g.amtRate), 'num'), td(g.noAmount ? g.noAmount + '건' : '', 'num'));
     });
     wrap.appendChild(table([groupLabel, n('품목 수(전월→당월)'), n('전월 수량'), n('당월 수량'), n('수량 증감'), n('증감률'), n('전월 금액'), n('당월 금액'), n('금액 증감'), n('증감률'), n('금액 미산정')], gRows));
-    wrap.appendChild(h('p', null, h('a', { href: '#/cause' + (isRaw ? '' : '/product') }, groupLabel + '별 증감 원인(입고·출고·단가·신규·소멸 분해) 보기')));
+    wrap.appendChild(h('p', null, h('a', { href: '#/cause' + (isRaw ? '' : '/' + kindKey) }, groupLabel + '별 증감 원인(입고·출고·단가·신규·소멸 분해) 보기')));
 
     // Aging 개월별 분포 · 판정
     var longM = k.longMonths;
     wrap.appendChild(h('h2', null, 'Aging 개월별 분포'));
-    wrap.appendChild(agingBasisNote(k.items, res));
+    wrap.appendChild(agingBasisNote(k, res));
     var metric = { v: 'amount' };
     var chartBox = h('div', { class: 'chart-box' });
-    function drawChart() { chartBox.textContent = ''; chartBox.appendChild(agingChart(k.buckets, longM, metric.v)); }
+    function drawChart() { chartBox.textContent = ''; chartBox.appendChild(agingChart(k.buckets, k.longText, metric.v, res.agingPath)); }
     var seg = h('div', { class: 'seg', role: 'group', 'aria-label': '그래프 값' });
     [['amount', '재고금액'], ['qty', '재고수량'], ['count', '품목 수']].forEach(function (o) {
       var b = h('button', { type: 'button', 'aria-pressed': o[0] === metric.v ? 'true' : 'false', onclick: function () {
@@ -576,7 +821,7 @@
     drawChart();
     wrap.appendChild(h('div', { class: 'two-col' },
       h('div', null, h('h3', null, '개월별 표'),
-        table(['경과 개월', n('품목 수'), n('재고수량'), n('재고금액'), '판정'], k.buckets.filter(function (b) { return b.count || b.month != null; }).map(function (b) {
+        table(['경과 개월', n('품목 수'), n('재고수량'), n('재고금액'), '판정'], k.buckets.filter(function (b) { return b.count || (b.month != null && !b.open); }).map(function (b) {
           return h('tr', null, td(b.bucket), td(fmt(b.count), 'num'), td(fmt(b.qty), 'num'), td(fmt(b.amount), 'num'),
             td(b.month == null ? '' : h('span', { class: 'fit ' + (b.long ? 'dead' : 'ok') }, b.long ? '장기재고' : '정상')));
         }))),
@@ -584,12 +829,16 @@
         table(['구분', n('품목 수'), n('재고수량'), n('재고금액')], k.fitness.filter(function (f) { return f.fitness !== '과잉' || settings.overEnabled === 'on'; }).map(function (f) {
           return h('tr', null, td(h('span', { class: 'fit ' + fitCls(f.fitness) }, f.fitness)), td(fmt(f.count), 'num'), td(fmt(f.qty), 'num'), td(fmt(f.amount), 'num'));
         })),
-        h('p', { class: 'note' }, '장기재고: 경과 ' + longM + '개월 이상 (' + (isRaw ? '원자재' : '제품') + ' 기준, 「기준 설정」에서 변경)' + (settings.overEnabled === 'on' ? ' · 과잉: ' + settings.overMonths + '개월 초과' : '')),
+        h('p', { class: 'note' }, '장기재고: 경과 ' + k.longText + ' (' + (isRaw ? '원자재' : '반제품·제품') + ' 기준, 「기준 설정」에서 변경)' + (settings.overEnabled === 'on' ? ' · 과잉: ' + settings.overMonths + '개월 초과' : '')),
         h('h3', null, '총괄 (정상 / 불용)'),
         table(['구분', n('품목 수'), n('재고수량'), n('재고금액')], k.overall.map(function (f) {
           return h('tr', null, td(f.label), td(fmt(f.count), 'num'), td(fmt(f.qty), 'num'), td(fmt(f.amount), 'num'));
         })),
         h('p', { class: 'note' }, '불용은 품목별 표의 「불용 확정」을 체크한 품목입니다(관련부서 확정 후).'))));
+
+    // 기준 비교 — 판매현황(출고)이 있으면 예전 경로(재고잔량분석 칸)와 최근 출고일 경로의 분포를 나란히
+    var cmp = compareTable(k, res);
+    if (cmp) { wrap.appendChild(h('h3', null, 'Aging 기준 비교 — 경로에 따라 분포가 어떻게 달라지는지')); wrap.appendChild(cmp); }
 
     // 품목별
     wrap.appendChild(h('h2', null, '품목별 증감 · Aging'));
@@ -599,22 +848,45 @@
 
   function fitCls(f) { return f === '정상' ? 'ok' : f === '과잉' ? 'over' : f === '장기재고' ? 'dead' : 'hold'; }
 
-  // Aging 표시 기준이 무엇이었는지 품목 수로 알림(출고현황이 없으면 재고잔량분석 칸으로 대체)
-  function agingBasisNote(items, res) {
+  // Aging 표시 기준이 무엇이었는지 품목 수로 알림(품목마다의 기준은 품목별 표의 「Aging 표시」 칸에 적힘)
+  function agingBasisNote(k, res) {
     var c = {};
-    items.forEach(function (it) { if (it.curQty) c[it.agingBasis] = (c[it.agingBasis] || 0) + 1; });
+    k.items.forEach(function (it) { if (it.curQty) { var key = it.agingBasis === '출고일' ? '출고일·' + it.lastOutSource : it.agingBasis; c[key] = (c[key] || 0) + 1; } });
     var parts = [];
-    if (c['출고일']) parts.push('최근 출고일 ' + fmt(c['출고일']) + '품목');
-    if (c['파일 경과 개월']) parts.push('재고잔량분석 칸으로 대체 ' + fmt(c['파일 경과 개월']) + '품목');
+    if (c['출고일·판매현황']) parts.push('판매현황 최근 출고일 ' + fmt(c['출고일·판매현황']) + '품목');
+    if (c['출고일·출고 이력']) parts.push('출고 이력 최근 출고일 ' + fmt(c['출고일·출고 이력']) + '품목');
+    if (c['파일 경과 개월']) parts.push('재고잔량분석 칸 ' + fmt(c['파일 경과 개월']) + '품목');
     if (c['입고일 대체']) parts.push('최근 입고일로 대체 ' + fmt(c['입고일 대체']) + '품목');
     if (c['없음']) parts.push('날짜 없음 ' + fmt(c['없음']) + '품목');
     var msg = 'Aging 기준 — ' + (parts.join(' · ') || '해당 품목 없음') + '.';
-    if (!res.hasHistory.outbound) msg += ' 출고현황(품번·최근 출고일)을 「자료」의 「출고현황 · 출고 이력」 자리에 올리면 최근 출고일 기준으로 바뀝니다.';
-    return h('p', { class: 'note' }, msg);
+    if (!res.hasHistory.outbound && !res.hasHistory.sales) msg += ' 판매현황(출고) 파일을 「자료」에 올리면 최근 출고일 기준으로 바뀝니다.';
+    return h('p', { class: 'note', 'data-basis': '' }, msg);
   }
-
+  // 두 경로의 개월별 분포(품목 수·금액) 비교 표. 두 경로가 같은 결과면(판매현황·출고 이력이 없으면) 그리지 않습니다.
+  function compareTable(k, res) {
+    if (!k.items.some(function (it) { return it.curQty && it.bucket !== it.bucketAlt; })) return null;
+    var alt = {}, labels = [];
+    k.buckets.forEach(function (b) { if (b.count) labels.push(b.bucket); });
+    k.bucketsAlt.forEach(function (b) { alt[b.bucket] = b; if (b.count && labels.indexOf(b.bucket) < 0) labels.push(b.bucket); });
+    var cur = {};
+    k.buckets.forEach(function (b) { cur[b.bucket] = b; });
+    var order = k.buckets.concat(k.bucketsAlt).map(function (b) { return b.bucket; });
+    labels.sort(function (a, b) { var ma = (cur[a] || alt[a]).month, mb = (cur[b] || alt[b]).month; return (ma == null ? 1e9 : ma) - (mb == null ? 1e9 : mb) || order.indexOf(a) - order.indexOf(b); });
+    var nowName = res.agingPath === 'file' ? '재고잔량분석 우선(지금)' : '최근 출고일 기준(지금)';
+    var altName = res.agingPath === 'file' ? '최근 출고일 기준' : '재고잔량분석 칸(예전)';
+    function longOf(list) { return list.filter(function (it) { return it.curQty > 0; }); }
+    var items = longOf(k.items);
+    var longNow = items.filter(function (it) { return it.fitness === '장기재고'; }), longAlt = items.filter(function (it) { return it.fitnessAlt === '장기재고'; });
+    var sum = function (l) { return l.reduce(function (a, it) { return a + (it.curAmt || 0); }, 0); };
+    var rows = labels.map(function (l) {
+      var a = cur[l] || { count: 0, amount: 0 }, b = alt[l] || { count: 0, amount: 0 };
+      return h('tr', null, td(l), td(fmt(b.count), 'num'), td(fmt(a.count), 'num'), td(fmtSigned(a.count - b.count), 'num ' + sign(a.count - b.count)), td(fmt(L.round(b.amount, 0)), 'num'), td(fmt(L.round(a.amount, 0)), 'num'));
+    });
+    rows.push(h('tr', { class: 'total' }, td('장기재고(' + k.longText + ')'), td(fmt(longAlt.length), 'num'), td(fmt(longNow.length), 'num'), td(fmtSigned(longNow.length - longAlt.length), 'num'), td(fmt(L.round(sum(longAlt), 0)), 'num'), td(fmt(L.round(sum(longNow), 0)), 'num')));
+    return table(['경과 개월', n(altName + ' 품목 수'), n(nowName + ' 품목 수'), n('품목 수 차이'), n(altName + ' 금액'), n(nowName + ' 금액')], rows);
+  }
   // 개월별 분포 막대그래프(SVG). 장기재고 경계에 세로 점선을 긋습니다.
-  function agingChart(buckets, longM, metric) {
+  function agingChart(buckets, longText, metric, path) {
     var NS = 'http://www.w3.org/2000/svg';
     function el(tag, attrs, text) {
       var e = document.createElementNS(NS, tag);
@@ -623,10 +895,11 @@
       return e;
     }
     var bars = buckets.filter(function (b) { return b.month != null; });
-    var W = 760, H = 260, L0 = 16, R0 = 16, T0 = 28, B0 = 44;
+    var W = 760, H = 280, L0 = 16, R0 = 16, T0 = 28, B0 = 60;
     var cw = (W - L0 - R0) / bars.length;
     var max = Math.max.apply(null, bars.map(function (b) { return b[metric]; }).concat([0])) || 1;
-    var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'aging-chart', role: 'img', 'aria-label': 'Aging 개월별 ' + (metric === 'amount' ? '재고금액' : metric === 'qty' ? '재고수량' : '품목 수') + ' 분포, ' + longM + '개월 이상 장기재고' });
+    var svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'aging-chart', role: 'img', 'aria-label': 'Aging 개월별 ' + (metric === 'amount' ? '재고금액' : metric === 'qty' ? '재고수량' : '품목 수') + ' 분포, ' + longText + ' 장기재고' });
+    var every = bars.length > 24 ? 3 : 1;   // 칸이 많으면(0~36) 눈금 글자는 3칸마다
     svg.appendChild(el('line', { x1: L0, x2: W - R0, y1: H - B0, y2: H - B0, class: 'axis' }));
     bars.forEach(function (b, i) {
       var v = b[metric], bh = (H - T0 - B0) * v / max;
@@ -634,23 +907,24 @@
       var r = el('rect', { x: x, y: H - B0 - bh, width: w, height: Math.max(0, bh), class: b.long ? 'bar long' : 'bar' });
       r.appendChild(el('title', null, b.bucket + ': ' + fmt(v) + (metric === 'amount' ? '원' : metric === 'qty' ? '' : '품목')));
       svg.appendChild(r);
-      svg.appendChild(el('text', { x: L0 + i * cw + cw / 2, y: H - B0 + 16, class: 'tick' }, i === bars.length - 1 ? b.month + '+' : String(b.month)));
+      if (b.open || i === bars.length - 1 || b.month % every === 0) svg.appendChild(el('text', { x: L0 + i * cw + cw / 2, y: H - B0 + (b.open ? 30 : 16), class: 'tick' + (b.open ? ' open' : '') }, b.tick));
     });
     var bi = -1;
     for (var i = 0; i < bars.length; i++) if (bars[i].long) { bi = i; break; }
     if (bi >= 0) {
       var lx = L0 + bi * cw;
       svg.appendChild(el('line', { x1: lx, x2: lx, y1: T0 - 18, y2: H - B0, class: 'cut' }));
-      svg.appendChild(el('text', { x: lx + 4, y: T0 - 8, class: 'cut-label', 'text-anchor': lx > W * 0.7 ? 'end' : 'start', dx: lx > W * 0.7 ? -8 : 0 }, '장기재고 ' + longM + '개월 이상'));
+      svg.appendChild(el('text', { x: lx + 4, y: T0 - 8, class: 'cut-label', 'text-anchor': lx > W * 0.7 ? 'end' : 'start', dx: lx > W * 0.7 ? -8 : 0 }, '장기재고 ' + longText));
     }
-    svg.appendChild(el('text', { x: W / 2, y: H - 6, class: 'axis-label' }, '경과 개월(최근 출고일 기준, 마지막 칸은 그 이상)'));
+    svg.appendChild(el('text', { x: W / 2, y: H - 4, class: 'axis-label' }, '경과 개월(' + (path === 'file' ? '재고잔량분석 칸 우선' : '최근 출고일 기준') + ') · 「>36」은 그 초과, 「>12?」는 파일의 「12개월 초과」(개월 미상)'));
     return svg;
   }
   function agingCell(it) {
     if (it.agingShown == null) return '';
     var s = fmt(it.agingShown) + '개월';
     if (it.agingBasis === '입고일 대체') s += ' (입고일 대체)';
-    if (it.agingBasis === '파일 경과 개월') s = (it.agingFileText || s) + ' (파일)';
+    if (it.agingBasis === '파일 경과 개월') s = (it.agingFileText || s) + ' (재고잔량분석)';
+    if (it.agingBasis === '출고일') s += it.lastOutSource === '판매현황' ? ' (판매현황)' : ' (출고 이력)';
     return s;
   }
 
@@ -733,7 +1007,7 @@
   function viewCause(kindKey) {
     var isRaw = kindKey === 'raw';
     var groupLabel = isRaw ? '대분류' : '고객사';
-    var kindLabel = isRaw ? '원자재' : '제품';
+    var kindLabel = KIND_TEXT[kindKey];
     var wrap = h('div', null, h('div', { class: 'page-head' }, h('h1', null, kindLabel + ' 증감 원인 — ' + groupLabel + '별 전월 대비')));
     var nd = needData(); if (nd) { wrap.appendChild(nd); return wrap; }
     var res = result();
@@ -741,7 +1015,8 @@
     wrap.appendChild(plantBar());
     wrap.appendChild(h('p', null,
       h('a', { href: '#/cause', 'aria-current': isRaw ? 'page' : null }, '원자재(대분류별)'), ' · ',
-      h('a', { href: '#/cause/product', 'aria-current': isRaw ? null : 'page' }, '제품(고객사별)')));
+      h('a', { href: '#/cause/semi', 'aria-current': kindKey === 'semi' ? 'page' : null }, '반제품(고객사별)'), ' · ',
+      h('a', { href: '#/cause/product', 'aria-current': kindKey === 'product' ? 'page' : null }, '제품(고객사별)')));
     var k = res[kindKey];
     wrap.appendChild(h('div', { class: 'alert info' },
       h('p', null, '금액 증감을 데이터로 계산할 수 있는 요인으로 나눕니다. 두 달 모두 재고가 있는 품목은 「전월 단가 × 수량 변화」(입고 + 출고·사용 + 조정·기타)와 「당월 수량 × 단가 변화」(단가 변동)로 나누고, 새로 생긴 품목은 신규, 없어진 품목은 소멸로 따로 셉니다. 요인을 모두 더하면 금액 증감과 정확히 같습니다.'),
@@ -771,7 +1046,7 @@
       S.setMemos(memoKey(), memos);
     }
     wrap.appendChild(h('h2', null, groupLabel + '별 기여 상위 품목 · 원인 메모'));
-    wrap.appendChild(h('p', { class: 'note' }, '메모와 AI 해설은 이 브라우저에 기준일·공장 보기별로 저장되고, 엑셀 「' + kindLabel + '_증감원인」 시트에 함께 들어갑니다.'));
+    wrap.appendChild(h('p', { class: 'note' }, '메모와 AI 해설은 이 브라우저에 기준일·공장 보기별로 저장되고, 엑셀 ' + '「' + kindLabel + '_증감원인」 시트' + (isRaw ? '와 보고용 「원자재」 시트의 비고 칸' : '') + '에 함께 들어갑니다' + '.'));
     var maskBox = h('input', { type: 'checkbox', checked: maskNames });
     maskBox.addEventListener('change', function () { maskNames = maskBox.checked; });
     wrap.appendChild(h('label', { class: 'check' }, maskBox, 'AI 프롬프트에서 품번·품명을 「품목1」처럼 가리기(회사 밖 AI 에 붙여 넣을 때 권장)'));
@@ -781,7 +1056,7 @@
       var card = h('section', { class: 'cause-card' },
         h('h3', null, g.group),
         h('p', { class: 'cause-line' }, L.causeSentence(g, function (x) { return fmt(L.round(x, 0)); })),
-        g.top.length ? table([n('순위'), isRaw ? '품번' : '제품코드', '품명', '구분', n('수량 전월→당월'), n('금액 증감'), n('입고 전월→당월'), n('출고 전월→당월'), n('수량 효과'), n('단가 효과'), '가장 큰 요인'],
+        g.top.length ? table([n('순위'), kindKey === 'product' ? '제품코드' : '품번', '품명', '구분', n('수량 전월→당월'), n('금액 증감'), n('입고 전월→당월'), n('출고 전월→당월'), n('수량 효과'), n('단가 효과'), '가장 큰 요인'],
           g.top.map(function (it, i) {
             return h('tr', null, td(i + 1, 'num'), td(it.code, 'nowrap'), td(it.name), td(it.change), td(fmt(it.prevQty) + '→' + fmt(it.curQty), 'num'),
               td(fmtSigned(it.diffAmt), 'num ' + sign(it.diffAmt)),
@@ -820,11 +1095,11 @@
     var res = result();
     var ns = needSettings(res); if (ns) { wrap.appendChild(ns); return wrap; }
     wrap.appendChild(plantBar());
-    var rules = ['금액 증가 상위 ' + settings.topN + '건(원자재·제품 각각)', '장기재고(원자재 ' + settings.longRawMonths + '개월·제품 ' + settings.longProdMonths + '개월 이상)', '불용 확정 품목'];
+    var rules = ['금액 증가 상위 ' + settings.topN + '건(원자재·반제품·제품 각각)', '장기재고(원자재 ' + L.longLabel(res.longRaw, res.longRawOp) + '·반제품·제품 ' + L.longLabel(res.longProd, res.longProdOp) + ')', '불용 확정 품목'];
     if (settings.overEnabled === 'on') rules.push('과잉(' + settings.overMonths + '개월 초과)');
     rules.push(settings.turnoverMax === '' ? '저회전: 기준 미설정(적용 안 함)' : '저회전(회전율 ' + settings.turnoverMax + ' 미만)');
     wrap.appendChild(h('div', { class: 'alert info' }, plantText() + ' · 선정 규칙 — ' + rules.join(' · ') + '. 원인과 개선방안은 엑셀로 내려받아 담당자가 적습니다.'));
-    ['원자재', '제품'].forEach(function (kind) {
+    ['원자재', '반제품', '제품'].forEach(function (kind) {
       var list = res.targets.filter(function (t) { return t.kind === kind; });
       wrap.appendChild(h('h2', null, kind + ' (' + list.length + '건)'));
       wrap.appendChild(table(['품번', '품명', kind === '원자재' ? '대분류' : '고객사', '선정 사유', n('당월 수량'), n('당월 금액'), n('금액 증감'), n('Aging 표시(개월)'), '최근 출고일', '판정'],
@@ -855,16 +1130,62 @@
     return wrap;
   }
 
+  // ── 보고서 대조 · 차이 알람 ─────────────────────────────
+  function viewRecon() {
+    var wrap = h('div', null, h('div', { class: 'page-head' }, h('h1', null, '보고서 대조 · 차이 알람')));
+    var nd = needData(); if (nd) { wrap.appendChild(nd); return wrap; }
+    var res = result();
+    var ns = needSettings(res); if (ns) { wrap.appendChild(ns); return wrap; }
+    var rc = res.recon;
+    wrap.appendChild(h('div', { class: 'alert info' },
+      h('p', null, '회사 보고서의 보고용 시트(원자재·반제품·제품)에 적힌 공장별 합계(수량·금액, ' + res.prevDate.slice(5, 7) + '월·' + res.curDate.slice(5, 7) + '월)를 도구가 상세 시트로 계산한 값과 맞대 봅니다. 합계 줄이 다르면 「차이」로 알람을 띄웁니다(허용 차이: 금액 ' + fmt(rc.tolerance) + '원, 수량 0.5).'),
+      h('p', null, '대분류·고객사 줄의 차이는 묶음표·고객사 표기 차이로도 생기므로 알람 대신 「참고」로만 보입니다. 알고 있는 차이는 「확인함」을 체크하면 알람에서 빠집니다(기준일마다 따로 저장).')));
+    if (!rc.hasReport) {
+      wrap.appendChild(h('div', { class: 'card' }, h('p', null, '아직 올린 회사 보고서가 없습니다.'), h('a', { class: 'btn btn-primary', href: '#/data' }, '「자료」에서 회사 보고서 올리기')));
+      return wrap;
+    }
+    if (rc.unresolved.length) wrap.appendChild(h('div', { class: 'alert warn' }, h('p', null, '공장을 정하지 못해 대조하지 않은 구역이 있습니다. 「기준 설정 → 보고서 구역 이름 → 공장」에 「구역이름=대구」처럼 적어 주세요.'),
+      h('ul', null, rc.unresolved.map(function (u) { return h('li', null, u); }))));
+    wrap.appendChild(h('div', { class: 'stats' },
+      stat('비교한 값', fmt(rc.compared), '공장·구분·달·수량/금액'),
+      stat('차이(알람)', fmt(rc.alarms.length), '합계 줄', rc.alarms.length ? 'down' : ''),
+      stat('확인함', fmt(rc.acked.length), '알람에서 뺀 차이'),
+      stat('참고', fmt(rc.infos.length), '대분류·고객사 줄')));
+    function rowsOf(list, status) {
+      return list.map(function (a) {
+        var cb = null;
+        if (status !== '참고') {
+          cb = h('input', { type: 'checkbox', checked: !!a.acked, 'aria-label': a.plant + ' ' + a.kindLabel + ' ' + a.month + '월 ' + a.field + ' 확인함' });
+          cb.addEventListener('change', function () {
+            var ack = S.getReconAck();
+            if (cb.checked) ack[a.key] = true; else delete ack[a.key];
+            S.setReconAck(ack); render();
+          });
+        }
+        return h('tr', { class: status === '차이' ? 'alarm-row' : null }, td(L.plantLabel(a.plant)), td(a.kindLabel), td(a.label), td(a.month ? a.month + '월(' + a.period + ')' : ''), td(a.field),
+          td(fmt(a.report), 'num'), td(fmt(a.tool), 'num'), td(a.diff == null ? '' : fmtSigned(a.diff), 'num ' + sign(a.diff)), td(a.file + (a.sheet ? ' [' + a.sheet + ']' : '')),
+          td(status + (a.note ? ' — ' + a.note : '')), td(cb ? h('label', { class: 'check' }, cb, '확인함') : ''));
+      });
+    }
+    var head = ['공장', '구분', '줄', '달', '항목', n('보고서 값'), n('도구 값'), n('차이(도구 − 보고서)'), '보고서 파일', '상태', ''];
+    wrap.appendChild(h('h2', null, '합계 줄 차이'));
+    wrap.appendChild(table(head, rowsOf(rc.alarms, '차이').concat(rowsOf(rc.acked, '확인함')), { cls: 'wide', empty: '합계 줄은 모두 허용 차이 안입니다.' }));
+    wrap.appendChild(h('details', null, h('summary', null, '참고 — 대분류·고객사 줄 차이 ' + rc.infos.length + '건'),
+      table(head, rowsOf(rc.infos, '참고'), { cls: 'wide', empty: '없습니다.' })));
+    return wrap;
+  }
+
   // ── 라우터 ───────────────────────────────────────────────
   function render() {
+    cachedRes = null;
     var hash = location.hash || '#/data';
     var segs = hash.replace(/^#\//, '').split('/');
     var route = segs[0] || 'data';
     var views = {
       data: viewData, settings: viewSettings,
-      raw: function () { return viewKind('raw'); }, product: function () { return viewKind('product'); },
-      cause: function () { return viewCause(segs[1] === 'product' ? 'product' : 'raw'); },
-      targets: viewTargets, unmatched: viewUnmatched
+      raw: function () { return viewKind('raw'); }, semi: function () { return viewKind('semi'); }, product: function () { return viewKind('product'); },
+      cause: function () { return viewCause(segs[1] === 'product' ? 'product' : segs[1] === 'semi' ? 'semi' : 'raw'); },
+      targets: viewTargets, unmatched: viewUnmatched, recon: viewRecon
     };
     if (!views[route]) route = 'data';
     renderHeader(route);

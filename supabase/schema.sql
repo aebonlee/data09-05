@@ -8,6 +8,8 @@
 --  재실행    : 안전합니다 (IF NOT EXISTS / CREATE OR REPLACE / DROP ... IF EXISTS 선행)
 --  2026-09-29 : Aging 을 일 → 개월로, 공장(인천·대구) 칸, 자리마다 파일 여러 개, 증감 원인 메모 표.
 --               예전 판을 이미 실행한 프로젝트에 다시 실행하면 1-B 절이 칸을 더하고 일 단위 설정을 개월로 바꿉니다.
+--  2026-09-29 저녁(3차) : 원자재 장기재고 「초과」/반제품·제품 「이상」 방식 칸, 분포 최대 처음 값 36, Aging 경로·판매현황 적용 대상,
+--               반제품 자리(semiCur·semiPrev)·보고서 자리(report), 판매현황 표 2개, 보고서 대조 표 2개(1-C 절).
 --
 --  본인 프로젝트에 올리는 것을 전제로 하므로 표 이름에 접두사를 붙이지 않았습니다.
 --  회사 Supabase 주소·키는 이 파일 어디에도 없습니다.
@@ -21,6 +23,10 @@
 --    unit_price      단가표·품목 기준정보 레코드          ← parts[].records (price)
 --    cause_memo      증감 원인 메모·AI 해설               ← localStorage 'memo.<기준일>.<공장 보기>'
 --    dead_confirm    불용 확정 품목(관련부서 확정 후 체크)  ← localStorage 'dead'
+--    sales_file      판매현황(출고) 파일 하나의 읽은 결과      ← localStorage 'sales'[] (byCode 제외)
+--    sales_month     품목·달별 출고수량·그 달 마지막 출고일    ← localStorage 'sales'[].byCode
+--    report_file     회사 보고서(대조용) 보고용 시트 구역·합계  ← localStorage 'data'.report.parts[]
+--    recon_ack       대조 차이 중 「확인함」으로 표시한 것       ← localStorage 'reconAck'
 --
 --  보안
 --    모든 표 RLS 켬. 행은 만든 사람(owner_id = auth.uid())만 보고 고칩니다.
@@ -41,9 +47,15 @@ create table if not exists public.app_settings (
   aging_months   text not null default '3, 6, 12',   -- (예비) 예전 Aging 구간 경계 — 앱은 개월별 분포로 바뀌어 쓰지 않음
   over_months    int not null default 6,             -- 과잉 구간을 켰을 때: 경과 개월이 넘으면 「과잉」
   dead_months    int not null default 12,            -- (예비) 예전 불용 기준 — 불용은 이제 사람이 확정(dead_confirm)
-  long_raw_months  int not null default 12,          -- 원자재: 경과 개월이 이 값 이상이면 「장기재고」
-  long_prod_months int not null default 6,           -- 제품: 경과 개월이 이 값 이상이면 「장기재고」
-  aging_max_months int not null default 12,          -- 개월별 분포를 몇 개월까지 한 칸씩
+  long_raw_months  int not null default 12,          -- 원자재 장기재고 기준 개월
+  long_raw_op      text not null default 'gt',        -- 원자재: gt = 기준 개월 「초과」(3차 답변), ge = 「이상」
+  long_prod_months int not null default 6,           -- 반제품·제품 장기재고 기준 개월
+  long_prod_op     text not null default 'ge',        -- 반제품·제품: ge = 「이상」
+  aging_max_months int not null default 36,          -- 개월별 분포를 몇 개월까지 한 칸씩(그 위는 「N개월 초과」)
+  aging_path       text not null default 'out',       -- out = 최근 출고일 기준 / file = 재고잔량분석 칸 먼저(예전)
+  sales_scope      text not null default 'prod',      -- 판매현황 최근 출고일 적용 대상: prod = 반제품·제품 / all = 원자재까지
+  recon_tolerance  numeric not null default 1,        -- 보고서 대조 허용 차이(원)
+  plant_alias      text not null default '',          -- 보고서 구역 이름 → 공장(한 줄에 「구역이름=대구」)
   over_enabled   boolean not null default false,     -- 과잉 구간 쓰기(기본 끔)
   no_out_policy  text not null default 'inbound'
                  check (no_out_policy in ('inbound', 'none')),
@@ -67,7 +79,7 @@ create table if not exists public.column_mapping (
   id          bigint generated always as identity primary key,
   owner_id    uuid not null default auth.uid(),
   def_key     text not null
-              check (def_key in ('rawStock', 'productStock', 'inbound', 'outbound', 'price')),
+              check (def_key in ('rawStock', 'semiStock', 'productStock', 'inbound', 'outbound', 'price')),
   mapping     jsonb not null default '{}'::jsonb check (jsonb_typeof(mapping) = 'object'),
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
@@ -81,7 +93,7 @@ create table if not exists public.upload_slot (
   id          bigint generated always as identity primary key,
   owner_id    uuid not null default auth.uid(),
   slot_id     text not null
-              check (slot_id in ('rawCur', 'rawPrev', 'prodCur', 'prodPrev', 'inbound', 'outbound', 'price')),
+              check (slot_id in ('rawCur', 'rawPrev', 'semiCur', 'semiPrev', 'prodCur', 'prodPrev', 'inbound', 'outbound', 'price')),
   part_key    text not null default '',
   plant       text not null default '',              -- 이 파일에 지정한 공장('' = 미지정·공통)
   file_name   text not null,
@@ -158,7 +170,7 @@ create table if not exists public.cause_memo (
   id          bigint generated always as identity primary key,
   owner_id    uuid not null default auth.uid(),
   memo_key    text not null check (length(btrim(memo_key)) > 0),  -- '<당월 기준일>.<공장 보기 또는 all>'
-  kind        text not null check (kind in ('raw', 'product')),
+  kind        text not null check (kind in ('raw', 'semi', 'product')),
   group_name  text not null check (length(btrim(group_name)) > 0),
   memo        text not null default '',                           -- 담당자 원인 메모
   ai          text not null default '',                           -- 붙여 넣은 AI 해설
@@ -172,7 +184,7 @@ create table if not exists public.cause_memo (
 create table if not exists public.dead_confirm (
   id          bigint generated always as identity primary key,
   owner_id    uuid not null default auth.uid(),
-  kind        text not null check (kind in ('raw', 'product')),
+  kind        text not null check (kind in ('raw', 'semi', 'product')),
   code        text not null check (length(btrim(code)) > 0),
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
@@ -268,6 +280,108 @@ alter table public.stock_movement add column if not exists plant text not null d
 alter table public.unit_price add column if not exists name       text not null default '';
 alter table public.unit_price add column if not exists group_name text not null default '';
 
+-- ----------------------------------------------------------------------------
+-- 1-C. 2026-09-29 저녁(3차) — 반제품 · 판매현황(출고) · 보고서 대조 · 장기재고 「초과/이상」
+--      2차 판을 실행한 프로젝트에 다시 실행하면 칸을 더하고, 분포 최대가 예전 처음 값 12 인 행은 36 으로 올립니다
+--      (앱의 migrateSettings 와 같은 규칙). 새로 설치하면 위 CREATE 에 이미 있어 바꾸는 것이 없습니다.
+-- ----------------------------------------------------------------------------
+do $r3$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'app_settings' and column_name = 'long_raw_op') then
+    alter table public.app_settings add column long_raw_op text not null default 'gt';
+    update public.app_settings set aging_max_months = 36 where aging_max_months = 12;
+  end if;
+end;
+$r3$;
+alter table public.app_settings add column if not exists long_prod_op    text    not null default 'ge';
+alter table public.app_settings add column if not exists aging_path      text    not null default 'out';
+alter table public.app_settings add column if not exists sales_scope     text    not null default 'prod';
+alter table public.app_settings add column if not exists recon_tolerance numeric not null default 1;
+alter table public.app_settings add column if not exists plant_alias     text    not null default '';
+alter table public.app_settings alter column aging_max_months set default 36;
+alter table public.app_settings drop constraint if exists app_settings_round3_check;
+alter table public.app_settings add constraint app_settings_round3_check check (
+  long_raw_op in ('gt', 'ge') and long_prod_op in ('gt', 'ge') and aging_path in ('out', 'file')
+  and sales_scope in ('prod', 'all') and recon_tolerance >= 0);
+
+-- 반제품 자리·종류 (CREATE 안의 CHECK 이름은 PostgreSQL 이 붙인 <표>_<칸>_check)
+alter table public.column_mapping drop constraint if exists column_mapping_def_key_check;
+alter table public.column_mapping add constraint column_mapping_def_key_check
+  check (def_key in ('rawStock', 'semiStock', 'productStock', 'inbound', 'outbound', 'price'));
+alter table public.upload_slot drop constraint if exists upload_slot_slot_id_check;
+alter table public.upload_slot add constraint upload_slot_slot_id_check
+  check (slot_id in ('rawCur', 'rawPrev', 'semiCur', 'semiPrev', 'prodCur', 'prodPrev', 'inbound', 'outbound', 'price'));
+alter table public.cause_memo drop constraint if exists cause_memo_kind_check;
+alter table public.cause_memo add constraint cause_memo_kind_check check (kind in ('raw', 'semi', 'product'));
+alter table public.dead_confirm drop constraint if exists dead_confirm_kind_check;
+alter table public.dead_confirm add constraint dead_confirm_kind_check check (kind in ('raw', 'semi', 'product'));
+
+-- 판매현황(출고) 파일 하나 — 앱 scanSales() 결과에서 품목별 자료(byCode)를 뺀 것
+create table if not exists public.sales_file (
+  id          bigint generated always as identity primary key,
+  owner_id    uuid not null default auth.uid(),
+  file_name   text not null check (length(btrim(file_name)) > 0),
+  sheet_name  text not null default '',
+  header_row  int not null default 1 check (header_row >= 1),
+  mapping     jsonb not null default '{}'::jsonb check (jsonb_typeof(mapping) = 'object'),  -- {code, date, qty, plant}
+  title_from  date,                                   -- 제목 줄 기간(「2025/01/01 ~ 2025/01/31」)
+  title_to    date,
+  stamp_date  date,                                   -- 맨 아래 출력 일시
+  partial     boolean not null default false,         -- 월 중간분(출력일 < 제목 기간 끝)
+  min_date    date,
+  max_date    date,
+  row_count   int not null default 0 check (row_count >= 0),
+  used_rows   int not null default 0 check (used_rows >= 0),
+  skipped     jsonb not null default '{}'::jsonb check (jsonb_typeof(skipped) = 'object'),
+  sample      boolean not null default false,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  -- 앱처럼 같은 이름 파일을 다시 올리면 바꿔 넣습니다 — ⚠ upsert 시 onConflict: 'owner_id,file_name'
+  constraint sales_file_owner_name_key unique (owner_id, file_name),
+  constraint sales_file_dates_check check (min_date is null or max_date is null or min_date <= max_date)
+);
+
+-- 품목·달별 출고수량과 그 달 마지막 출고일(일) — 앱 byCode[품목][YYYY-MM] = [수량 합, 마지막 일]
+create table if not exists public.sales_month (
+  id            bigint generated always as identity primary key,
+  owner_id      uuid not null default auth.uid(),
+  sales_file_id bigint not null references public.sales_file(id) on delete cascade,
+  code          text not null check (length(btrim(code)) > 0),
+  month         text not null check (month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+  qty           numeric not null default 0,
+  last_day      int not null check (last_day between 1 and 31),
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'sales_file_id,code,month'
+  constraint sales_month_file_code_month_key unique (sales_file_id, code, month)
+);
+create index if not exists sales_month_code_idx on public.sales_month (code, month desc);
+
+-- 회사 보고서(대조용) — 앱 parseReportBook() 결과: 보고용 시트 구역마다 달별 수량·금액
+create table if not exists public.report_file (
+  id          bigint generated always as identity primary key,
+  owner_id    uuid not null default auth.uid(),
+  file_name   text not null check (length(btrim(file_name)) > 0),
+  file_plant  text not null default '' check (file_plant in ('', '인천', '대구')),
+  sections    jsonb not null default '[]'::jsonb check (jsonb_typeof(sections) = 'array'),
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,file_name'
+  constraint report_file_owner_name_key unique (owner_id, file_name)
+);
+
+-- 대조 차이 「확인함」 — 키: '<기준일>|<공장>|<종류>|<줄>|<달>|<수량/금액>'
+create table if not exists public.recon_ack (
+  id          bigint generated always as identity primary key,
+  owner_id    uuid not null default auth.uid(),
+  ack_key     text not null check (length(btrim(ack_key)) > 0),
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'owner_id,ack_key'
+  constraint recon_ack_owner_key unique (owner_id, ack_key)
+);
+
 -- 공장: 분석 대상 밖(중국)은 앱이 읽을 때 빼므로 DB 에도 들어오지 않게 막습니다
 alter table public.upload_slot    drop constraint if exists upload_slot_plant_check;
 alter table public.upload_slot    add  constraint upload_slot_plant_check    check (plant in ('', '인천', '대구'));
@@ -295,7 +409,8 @@ do $trg$
 declare t text;
 begin
   foreach t in array array['app_settings','column_mapping','upload_slot',
-                           'stock_item','stock_movement','unit_price','cause_memo','dead_confirm']
+                           'stock_item','stock_movement','unit_price','cause_memo','dead_confirm',
+                           'sales_file','sales_month','report_file','recon_ack']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I
@@ -316,12 +431,16 @@ alter table public.stock_movement enable row level security;
 alter table public.unit_price     enable row level security;
 alter table public.cause_memo     enable row level security;
 alter table public.dead_confirm   enable row level security;
+alter table public.sales_file     enable row level security;
+alter table public.sales_month    enable row level security;
+alter table public.report_file    enable row level security;
+alter table public.recon_ack      enable row level security;
 
 -- 부모가 없는 표: owner_id 만 봅니다
 do $rls$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','cause_memo','dead_confirm']
+  foreach t in array array['app_settings','column_mapping','upload_slot','cause_memo','dead_confirm','sales_file','report_file','recon_ack']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);
@@ -353,6 +472,23 @@ begin
     execute format('create policy %I on public.%I for update to authenticated using (%s) with check (%s)', t || '_update', t, v_own, v_par);
     execute format('create policy %I on public.%I for delete to authenticated using (%s)', t || '_delete', t, v_own);
   end loop;
+end;
+$rls$;
+
+-- 판매현황 품목·달 표: 본인 행이면서, 붙는 sales_file 도 본인 것이어야 합니다
+do $rls$
+declare
+  v_own text := 'owner_id = auth.uid()';
+  v_par text := 'owner_id = auth.uid() and exists (select 1 from public.sales_file f where f.id = sales_file_id and f.owner_id = auth.uid())';
+begin
+  drop policy if exists sales_month_select on public.sales_month;
+  drop policy if exists sales_month_insert on public.sales_month;
+  drop policy if exists sales_month_update on public.sales_month;
+  drop policy if exists sales_month_delete on public.sales_month;
+  execute format('create policy sales_month_select on public.sales_month for select to authenticated using (%s)', v_own);
+  execute format('create policy sales_month_insert on public.sales_month for insert to authenticated with check (%s)', v_par);
+  execute format('create policy sales_month_update on public.sales_month for update to authenticated using (%s) with check (%s)', v_own, v_par);
+  execute format('create policy sales_month_delete on public.sales_month for delete to authenticated using (%s)', v_own);
 end;
 $rls$;
 

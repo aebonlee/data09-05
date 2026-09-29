@@ -58,7 +58,7 @@ begin
   perform public._assert(v_bad is null, '두 번 적용 후 표마다 정책 4개 (발견: ' || coalesce(v_bad, '없음') || ')');
   perform public._assert_eq(
     (select count(*) from pg_trigger where tgname like '%\_updated\_at' and not tgisinternal),
-    8::bigint, '두 번 적용 후 updated_at 트리거 8개');
+    12::bigint, '두 번 적용 후 updated_at 트리거 12개');
 end $t$;
 
 do $t$ begin raise notice '[프로젝트] 함수 권한(proacl)'; end $t$;
@@ -84,7 +84,7 @@ set role authenticated;
 set request.jwt.claim.sub = 'aaaaaaaa-0000-0000-0000-000000000001';
 
 do $t$
-declare v_up bigint; v_mv bigint; v_pr bigint;
+declare v_up bigint; v_mv bigint; v_pr bigint; v_sf bigint;
 begin
   insert into public.app_settings (cur_date, prev_date) values ('2026-08-31', '2026-07-31');
   insert into public.column_mapping (def_key, mapping) values ('rawStock', '{"code":"자재코드","qty":"현재고"}')
@@ -115,7 +115,24 @@ begin
   perform public._assert_eq((select memo from public.cause_memo), '고친 메모'::text, 'cause_memo upsert 가 덮어쓴다(한 행)');
   insert into public.dead_confirm (kind, code) values ('raw', 'RM-1') on conflict (owner_id, kind, code) do nothing;
   perform public._assert_eq((select long_raw_months || '/' || long_prod_months || '/' || aging_max_months || '/' || over_enabled from public.app_settings),
-    '12/6/12/false'::text, '장기재고 처음 값 원자재 12 · 제품 6 · 분포 12 · 과잉 끔');
+    '12/6/36/false'::text, '장기재고 처음 값 원자재 12 · 반제품·제품 6 · 분포 36 · 과잉 끔');
+  perform public._assert_eq((select long_raw_op || '/' || long_prod_op || '/' || aging_path || '/' || sales_scope || '/' || recon_tolerance from public.app_settings),
+    'gt/ge/out/prod/1'::text, '3차 처음 값: 원자재 초과 · 반제품·제품 이상 · 최근 출고일 경로 · 판매현황 반제품·제품 · 허용 차이 1원');
+  -- 반제품 자리 · 판매현황 · 보고서 · 확인함
+  insert into public.upload_slot (slot_id, part_key, plant, file_name) values ('semiCur', 'plant:인천', '인천', '본사.xlsx');
+  insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'semi', '고객1', '반제품 메모');
+  insert into public.dead_confirm (kind, code) values ('semi', 'SF-1');
+  -- 같은 문장(CTE) 안에서 넣은 부모 행은 RLS 의 exists 에 안 보이므로 문장을 나눕니다(앱도 파일 → 품목 순서로 넣을 것)
+  insert into public.sales_file (file_name, header_row, mapping, title_from, title_to, stamp_date, partial, min_date, max_date, row_count, used_rows)
+    values ('판매현황(26.09).xlsx', 2, '{"code":"품목코드","date":"판매일자","qty":"수량"}', '2026-09-01', '2026-09-30', '2026-09-29', true, '2026-09-01', '2026-09-29', 5, 3) returning id into v_sf;
+  insert into public.sales_month (sales_file_id, code, month, qty, last_day) values (v_sf, 'P1', '2026-09', 7, 15);
+  insert into public.sales_file (file_name) values ('판매현황(26.09).xlsx')
+    on conflict (owner_id, file_name) do update set header_row = 2;
+  perform public._assert_eq((select count(*) from public.sales_file), 1::bigint, 'sales_file upsert(onConflict owner_id,file_name) — 같은 이름은 한 행');
+  insert into public.report_file (file_name, file_plant, sections) values ('8월재고분석(본사).xlsx', '인천', '[{"sheet":"원자재","kind":"raw"}]');
+  insert into public.recon_ack (ack_key) values ('2026-08-31|인천|raw|합계|7|금액') on conflict (owner_id, ack_key) do nothing;
+  insert into public.recon_ack (ack_key) values ('2026-08-31|인천|raw|합계|7|금액') on conflict (owner_id, ack_key) do nothing;
+  perform public._assert_eq((select count(*) from public.recon_ack), 1::bigint, 'recon_ack 같은 키는 한 행');
   perform public._assert_eq((select agg from (select string_agg(aging_months || '/' || over_months || '/' || dead_months, '') as agg from public.app_settings) q),
     '3, 6, 12/6/12'::text, '새로 만든 기준 설정은 개월 처음 값 3, 6, 12 / 6 / 12');
 
@@ -141,7 +158,7 @@ set request.jwt.claim.sub = 'bbbbbbbb-0000-0000-0000-000000000002';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm','sales_file','sales_month','report_file','recon_ack']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
     perform public._assert_rows(format('update public.%I set updated_at = now()', t), 0, 'B 는 A 의 ' || t || ' 를 못 고친다');
@@ -168,6 +185,16 @@ begin
     format('insert into public.stock_item (upload_id, code, qty) values (%s, %L, 1)', v_up, 'X'),
     '42501', 'B 가 A 의 upload_id 를 알아도 레코드를 붙이지 못한다');
 end $t$;
+reset role;
+do $t$
+declare v_sf bigint;
+begin
+  select id into v_sf from public.sales_file limit 1;
+  execute 'set local role authenticated';
+  perform public._assert_raises(
+    format('insert into public.sales_month (sales_file_id, code, month, last_day) values (%s, %L, %L, 1)', v_sf, 'X', '2026-09'),
+    '42501', 'B 가 A 의 sales_file id 를 알아도 판매현황 행을 붙이지 못한다');
+end $t$;
 
 -- ----------------------------------------------------------------------------
 -- anon(비로그인)은 아무것도 못 보고 못 쓴다
@@ -179,7 +206,7 @@ set request.jwt.claim.sub = '';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm','sales_file','sales_month','report_file','recon_ack']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -228,8 +255,26 @@ begin
     '23514', '중국공장 파일은 CHECK 가 막는다');
   perform public._assert_raises(format('insert into public.stock_item (owner_id, upload_id, code, qty, plant) values (%L, %s, %L, 1, %L)', a, v_up, 'RM-8', '중국'),
     '23514', '중국공장 재고 행은 CHECK 가 막는다');
-  perform public._assert_raises(format('insert into public.cause_memo (owner_id, memo_key, kind, group_name) values (%L, %L, %L, %L)', a, 'k', 'semi', 'g'),
-    '23514', '증감 원인 메모 종류는 raw/product 만');
+  perform public._assert_raises(format('insert into public.cause_memo (owner_id, memo_key, kind, group_name) values (%L, %L, %L, %L)', a, 'k', 'etc', 'g'),
+    '23514', '증감 원인 메모 종류는 raw/semi/product 만');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, long_raw_op) values (%L, %L)', gen_random_uuid(), 'gte'),
+    '23514', '장기재고 방식은 gt(초과)/ge(이상) 만');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, recon_tolerance) values (%L, -1)', gen_random_uuid()),
+    '23514', '대조 허용 차이는 음수 불가');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, sales_scope) values (%L, %L)', gen_random_uuid(), 'raw'),
+    '23514', '판매현황 적용 대상은 prod/all 만');
+  perform public._assert_raises(format('insert into public.sales_month (owner_id, sales_file_id, code, month, last_day) values (%L, %s, %L, %L, 1)', a, (select id from public.sales_file where owner_id = a), 'P2', '2026-13'),
+    '23514', '판매현황 달은 YYYY-MM(01~12)');
+  perform public._assert_raises(format('insert into public.sales_month (owner_id, sales_file_id, code, month, last_day) values (%L, %s, %L, %L, 32)', a, (select id from public.sales_file where owner_id = a), 'P2', '2026-09'),
+    '23514', '마지막 출고일(일)은 1~31');
+  perform public._assert_raises(format('insert into public.sales_month (owner_id, sales_file_id, code, month, last_day) values (%L, %s, %L, %L, 3)', a, (select id from public.sales_file where owner_id = a), 'P1', '2026-09'),
+    '23505', '같은 파일·품목·달은 한 행');
+  perform public._assert_raises(format('insert into public.report_file (owner_id, file_name, file_plant) values (%L, %L, %L)', a, 'x.xlsx', '중국'),
+    '23514', '보고서 파일 공장은 인천·대구·미지정만');
+  perform public._assert_raises(format('insert into public.sales_file (owner_id, file_name, min_date, max_date) values (%L, %L, %L, %L)', a, 'y.xlsx', '2026-09-30', '2026-09-01'),
+    '23514', '판매현황 첫 출고일 ≤ 마지막 출고일');
+  delete from public.sales_file where owner_id = a;
+  perform public._assert_eq((select count(*) from public.sales_month where owner_id = a), 0::bigint, '판매현황 파일을 빼면 품목·달 행도 지워진다 (on delete cascade)');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, cur_date, prev_date) values (%L, %L, %L)', gen_random_uuid(), '2026-07-31', '2026-08-31'),
     '23514', '전월 기준일이 당월보다 늦으면 CHECK 가 막는다');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, no_out_policy) values (%L, %L)', gen_random_uuid(), 'guess'),

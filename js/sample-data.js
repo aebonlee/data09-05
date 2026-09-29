@@ -12,6 +12,10 @@
  *  - 원자재 대분류는 ERP 코드(HSG·SEAL·TML·TUBE·WIRE·CLIP·SWITCH·기타 …) — 보고서 대분류(하우징류 …)는 묶음표로 만듭니다
  *  - 기준정보: 제품 품목 마스터(품번·대분류(=고객사)·품명·마지막 단가)
  *  - 입고·출고 이력은 실데이터에 없습니다. 증감 원인(입고·출고 분해)을 시연하려고 가상 이력을 따로 둡니다.
+ *  - (3차) 반제품 시트(인천 「8월반제품(본사)」 — 금액 칸 「합계금액」, 대구 「대구 8월 반제품」 — 「재고*반제품단가」),
+ *    판매현황 파일(1행 「회사명 : … / 2026/07/01 ~ 2026/07/31」, 2행 머리행, 판매일자 「2026/07/03 -1」, 맨 아래 「계」「총합계」·출력 일시 줄),
+ *    보고용 시트(「원자재」「반제품」「제품」 — 「○○기준」 구역, 「재고현황(07월)」 머리행)를 흉내 냈습니다.
+ *    보고용 원자재 인천 7월 합계 금액은 차이 알람을 시연하려고 일부러 1,000원 다르게 적었습니다.
  */
 (function (root) {
   'use strict';
@@ -50,6 +54,26 @@
     ['FG-507', '예시제품 사', '완제품', '대구', '예시고객사 3', 75, 75, 27000, 27000, 12, 13],
     ['FG-601', '예시제품 아', '완제품', '대구', '예시고객사 1', 200, 150, 9000, 9000, 0, 0]
   ];
+
+  // [품목코드, 품목명[규격], 대분류, 공장, 고객사, 전월, 당월, 전월 반제품단가, 당월 반제품단가, 전월 경과 개월, 당월 경과 개월]
+  var SEMI = [
+    ['SF-101', '예시반제품 가 [SUB]', '반제품', '인천', '예시고객사 1', 120, 150, 9000, 9000, 1, 0],
+    ['SF-102', '예시반제품 나 [SUB]', '반제품', '인천', '예시고객사 2', 40, 40, 15000, 15000, 7, 8],
+    ['SF-201', '예시반제품 다 [SUB]', '반제품', '대구', '예시고객사 3', 300, 260, 2500, 2500, 12, 13],
+    ['SF-202', '예시반제품 라 [SUB]', '반제품', '대구', '예시고객사 1', 0, 90, null, 4000, null, 0]
+  ];
+
+  // 가상 판매현황(출고) [품목코드, 품목명, 대분류, 판매일자, 수량, 단가, 거래처] — 25년 12월·26년 7월·8월 세 파일.
+  // 원자재 일부(유상사급 판매처럼)와 반제품·제품. 8월 파일은 열 차이 인식을 보이려고 「창고」 칸이 하나 더 있습니다.
+  var SALES = {
+    '2025-12': [['FG-503', '예시제품 다', '완제품', '2025-12-10', 10, 35000, '예시고객사 2'], ['FG-507', '예시제품 사', '완제품', '2025-12-22', 5, 27000, '예시고객사 3'],
+      ['SF-201', '예시반제품 다 [SUB]', '반제품', '2025-12-05', 40, 2500, '예시고객사 3']],
+    '2026-07': [['FG-502', '예시제품 나', '완제품', '2026-07-15', 60, 22000, '예시고객사 1'], ['FG-601', '예시제품 아', '완제품', '2026-07-30', 50, 9000, '예시고객사 1'],
+      ['H-1003', '예시 하우징 2P [HSG]', 'HSG', '2026-07-08', 20, 5200, '예시협력사 A'], ['SF-102', '예시반제품 나 [SUB]', '반제품', '2026-07-21', 5, 15000, '예시고객사 2']],
+    '2026-08': [['FG-501', '예시제품 가', '완제품', '2026-08-29', 300, 18000, '예시고객사 1'], ['FG-504', '예시제품 라', '완제품', '2026-08-20', 160, 12500, '예시고객사 2'],
+      ['FG-501', '예시제품 가', '완제품', '2026-08-03', 40, 18000, '예시고객사 1'], ['H-1001', '예시 하우징 6P [HSG]', 'HSG', '2026-08-12', 500, 120, '예시협력사 A'],
+      ['SF-101', '예시반제품 가 [SUB]', '반제품', '2026-08-25', 30, 9000, '예시고객사 1']]
+  };
 
   // 가상 입·출고 이력 [품번, 일자, 수량] — 공장 칸 없음(공통). 일부 품목만 있습니다.
   var INBOUND = [
@@ -125,17 +149,106 @@
     return [head].concat(body);
   }
 
+  function semiSheet(plant, cur) {
+    var qi = cur ? 6 : 5, pi = cur ? 8 : 7, ai = cur ? 10 : 9;
+    var rows = SEMI.filter(function (r) { return r[3] === plant && r[qi] !== 0; });
+    if (plant === '인천') {
+      var head = ['품목코드', '품목명[규격]', '대분류', '재고수량', '완제품단가', '재고*완제품단가', '반제품단가', '합계금액', '재고잔량', '고객사'];
+      return [['회사명 : 예시회사(가상) / 예시-반제품-본사창고 외 / ' + (cur ? '2026/08/31' : '2026/07/31') + '  / 재고현황'], head]
+        .concat(rows.map(function (r) { return [r[0], r[1], r[2], r[qi], r[pi] == null ? '' : r[pi] * 1.5, money(r[qi], r[pi] == null ? null : r[pi] * 1.5), r[pi] == null ? '' : r[pi], money(r[qi], r[pi]), agingText(r[ai], 'hq'), r[4]]; }));
+    }
+    var hd = ['품목코드', '품목명[규격]', '대분류', '재고수량', '완제품단가', '반제품단가', '재고*완제품단가', '재고*반제품단가', '고객사', '잔량분석'];
+    return [hd].concat(rows.map(function (r) { return [r[0], r[1], r[2], r[qi], r[pi] == null ? '' : r[pi] * 1.5, r[pi] == null ? '' : r[pi], money(r[qi], r[pi] == null ? null : r[pi] * 1.5), money(r[qi], r[pi]), r[4], agingText(r[ai], 'daegu')]; }));
+  }
+
+  // 판매현황 한 달 파일(한 시트 「판매현황내역」)
+  function salesSheet(month) {
+    var y = month.slice(0, 4), m = month.slice(5, 7), last = new Date(+y, +m, 0).getDate();
+    var extra = month === '2026-08';
+    var head = ['주문일자', '프로젝트명', '판매일자', '대분류', '품목코드', '품목명(규격)', '수량', '단가', '공급가액', '거래처명', '비고'];
+    if (extra) head.splice(6, 0, '창고');
+    var q = 0, amt = 0;
+    var body = SALES[month].map(function (r, i) {
+      q += r[4]; amt += r[4] * r[5];
+      var line = [r[3].replace(/-/g, '/') + ' -' + (i + 1), '', r[3].replace(/-/g, '/') + ' -' + (i + 1), r[2], r[0], r[1], r[4], r[5], r[4] * r[5], r[6], ''];
+      if (extra) line.splice(6, 0, '예시창고');
+      return line;
+    });
+    var pad = function (a) { while (a.length < head.length) a.push(''); return a; };
+    var stamp = month === '2026-08' ? '2026/09/02 (수) 오전 9:10:11' : y + '/' + m + '/' + last + ' (예시) 오후 6:00:00';
+    return [pad(['회사명 : 예시회사(가상) / ' + y + '/' + m + '/01  ~ ' + y + '/' + m + '/' + last + ' ']), head].concat(body,
+      [pad([y + '/' + m + '  계', '', '', '', '', '', q, '', amt]), pad(['총합계', '', '', '', '', '', q, '', amt]), pad([stamp])]);
+  }
+  function salesBooks() {
+    var out = {};
+    Object.keys(SALES).forEach(function (k) { out['예시데이터_판매현황(' + k.slice(2, 4) + '.' + k.slice(5, 7) + ').xlsx'] = { '판매현황내역': salesSheet(k) }; });
+    return out;
+  }
+
+  // 보고용 시트(원자재·반제품·제품) — 가상 재고 값에서 만든 요약. 인천 원자재 7월 합계 금액은 일부러 +1,000원(차이 알람 시연)
+  var GROUP = { HSG: '하우징류', SEAL: '씰류', TML: '터미널류', TUBE: '튜브류', WIRE: '와이어류', CLIP: '클립류', SWITCH: '스위치' };
+  function sumBy(rows, keyFn, qi, pi) {
+    var out = {}, order = [];
+    rows.forEach(function (r) {
+      var k = keyFn(r);
+      if (!out[k]) { out[k] = { q: 0, a: 0, n: 0 }; order.push(k); }
+      out[k].q += r[qi]; out[k].a += Number(money(r[qi], r[pi])) || 0; if (r[qi]) out[k].n++;
+    });
+    return { map: out, order: order };
+  }
+  function reportRaw(plant, title, bump) {
+    var rows = RAW.filter(function (r) { return r[3] === plant; });
+    var key = function (r) { return GROUP[r[2]] || '기타'; };
+    var p = sumBy(rows, key, 4, 6), c = sumBy(rows, key, 5, 7);
+    var groups = ['하우징류', '씰류', '터미널류', '튜브류', '와이어류', '클립류', '스위치', '기타'].filter(function (g) { return p.map[g] || c.map[g]; });
+    var out = [[title], ['구분', '대분류', '재고현황(07월)', '', '재고현황(08월)', '', '수량 증감 비교 (08월재고현황 - 07월재고현황)', '금액 증감 비교 (08월재고현황 - 07월재고현황)', '원인분석', '', '비고'],
+      ['', '', ' 수량', '금액', ' 수량', '금액', '', '', '07월 재고현황', '08월 재고현황']];
+    var t = { pq: 0, pa: 0, cq: 0, ca: 0 };
+    groups.forEach(function (g, i) {
+      var a = p.map[g] || { q: 0, a: 0, n: 0 }, b = c.map[g] || { q: 0, a: 0, n: 0 };
+      t.pq += a.q; t.pa += a.a; t.cq += b.q; t.ca += b.a;
+      out.push([i ? '' : '원자재', g, a.q, a.a, b.q, b.a, b.q - a.q, b.a - a.a, a.n + '종', b.n + '종', '']);
+    });
+    out.push(['', '합계', t.pq, t.pa + (bump || 0), t.cq, t.ca, t.cq - t.pq, t.ca - t.pa - (bump || 0), '', '', '']);
+    return out;
+  }
+  function reportCust(list, plant, title, qiP, qiC, piP, piC, priceMul) {
+    var rows = list.filter(function (r) { return r[3] === plant; });
+    var p = sumBy(rows.map(function (r) { return r.slice(0, 7).concat([r[piP] == null ? null : r[piP] * priceMul]); }), function (r) { return r[4]; }, qiP, 7);
+    var c = sumBy(rows.map(function (r) { return r.slice(0, 7).concat([r[piC] == null ? null : r[piC] * priceMul]); }), function (r) { return r[4]; }, qiC, 7);
+    var out = [[title], ['구분', '07월 재고현황', '', '08월 재고현황', '', '', '재고잔량분석'], ['', ' 수량', '금액', ' 수량', '금액', '']];
+    var t = [0, 0, 0, 0];
+    c.order.concat(p.order.filter(function (k) { return !c.map[k]; })).forEach(function (k) {
+      var a = p.map[k] || { q: 0, a: 0 }, b = c.map[k] || { q: 0, a: 0 };
+      t[0] += a.q; t[1] += a.a; t[2] += b.q; t[3] += b.a;
+      out.push([k, a.q, a.a, b.q, b.a, '']);
+    });
+    out.push(['총합계', t[0], t[1], t[2], t[3], '']);
+    return out;
+  }
+  function reportSheets(plant) {
+    var title = plant === '인천' ? '본사기준' : '대구기준';
+    return {
+      '원자재': reportRaw(plant, title, plant === '인천' ? 1000 : 0),
+      '반제품': reportCust(SEMI, plant, title, 5, 6, 7, 8, 1),
+      '제품': reportCust(PROD, plant, title, 5, 6, 7, 8, 1)
+    };
+  }
+
   // 통합문서 3개 + 이력 CSV 2개 — 실데이터 파일 이름 형식을 따르되 앞에 「예시데이터_」를 붙였습니다
+  function merge(a, b) { var o = {}; [a, b].forEach(function (x) { Object.keys(x).forEach(function (k) { o[k] = x[k]; }); }); return o; }
   function workbooks() {
     return {
-      '예시데이터_8월재고분석(본사).xlsx': {
+      '예시데이터_8월재고분석(본사).xlsx': merge(reportSheets('인천'), {
         '8월 원자재(본사)': rawSheet('인천', true), '7월 원자재(본사)': rawSheet('인천', false),
+        '8월반제품(본사)': semiSheet('인천', true), '7월반제품(본사)': semiSheet('인천', false),
         '8월제품': prodSheet('인천', true), '7월제품': prodSheet('인천', false)
-      },
-      '예시데이터_8월재고분석현황(대구).xlsx': {
+      }),
+      '예시데이터_8월재고분석현황(대구).xlsx': merge(reportSheets('대구'), {
         '대구 8월 원자재': rawSheet('대구', true), '대구 7월 원자재': rawSheet('대구', false),
+        '대구 8월 반제품': semiSheet('대구', true), '대구 7월 반제품': semiSheet('대구', false),
         '대구 8월 제품': prodSheet('대구', true), '대구 7월 제품': prodSheet('대구', false)
-      },
+      }),
       '예시데이터_기준정보관리.xlsx': { 'Sheet': MASTER }
     };
   }
@@ -150,6 +263,8 @@
   var LOAD_PLAN = {
     rawCur: [['예시데이터_8월재고분석(본사).xlsx', '8월 원자재(본사)'], ['예시데이터_8월재고분석현황(대구).xlsx', '대구 8월 원자재']],
     rawPrev: [['예시데이터_8월재고분석(본사).xlsx', '7월 원자재(본사)'], ['예시데이터_8월재고분석현황(대구).xlsx', '대구 7월 원자재']],
+    semiCur: [['예시데이터_8월재고분석(본사).xlsx', '8월반제품(본사)'], ['예시데이터_8월재고분석현황(대구).xlsx', '대구 8월 반제품']],
+    semiPrev: [['예시데이터_8월재고분석(본사).xlsx', '7월반제품(본사)'], ['예시데이터_8월재고분석현황(대구).xlsx', '대구 7월 반제품']],
     prodCur: [['예시데이터_8월재고분석(본사).xlsx', '8월제품'], ['예시데이터_8월재고분석현황(대구).xlsx', '대구 8월 제품']],
     prodPrev: [['예시데이터_8월재고분석(본사).xlsx', '7월제품'], ['예시데이터_8월재고분석현황(대구).xlsx', '대구 7월 제품']],
     inbound: [['예시데이터_입고이력(가상).csv', null]],
@@ -170,7 +285,9 @@
     return out;
   }
 
-  var api = { CUR: CUR, PREV: PREV, build: build, workbooks: workbooks, histories: histories, RAW: RAW, PROD: PROD };
+  // 보고서 대조 자리에 올릴 통합문서(재고분석 파일 두 개 그대로)
+  var REPORT_FILES = ['예시데이터_8월재고분석(본사).xlsx', '예시데이터_8월재고분석현황(대구).xlsx'];
+  var api = { CUR: CUR, PREV: PREV, build: build, workbooks: workbooks, histories: histories, salesBooks: salesBooks, REPORT_FILES: REPORT_FILES, RAW: RAW, SEMI: SEMI, PROD: PROD };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.InvSample = api;
 })(typeof window !== 'undefined' ? window : this);

@@ -194,3 +194,13 @@ table.wide td:nth-child(2) { min-width: 8em; }
 .aging-chart .tick { font-size: 12px; fill: var(--muted); text-anchor: middle; }
 .aging-chart .cut-label { font-size: 12px; fill: var(--dead); font-weight: 700; }
 .aging-chart .axis-label { font-size: 12px; fill: var(--muted); text-anchor: middle; }
+
+/* ── 2026-09-29 3차: 차이 알람 띠 · 판매현황 진행률 · 반제품 ───────────── */
+.alarm-banner { background: #fde8e6; border-bottom: 1px solid #e3a59f; color: #7a1b14; font-size: .95rem; padding: 8px var(--container-pad); text-align: center; word-break: keep-all; overflow-wrap: break-word; }
+.alarm-banner a { color: inherit; font-weight: 700; }
+.progress-box { margin-top: 12px; }
+.sales-progress { width: 100%; height: 14px; accent-color: var(--brand, #1b5fa8); }
+.sales-card details, .card details { margin-top: 12px; }
+.sales-card summary, .card summary { cursor: pointer; font-weight: 700; }
+tr.alarm-row td { background: #fff1ef; }
+.aging-chart .tick.open { font-size: 11px; fill: var(--dead); }
