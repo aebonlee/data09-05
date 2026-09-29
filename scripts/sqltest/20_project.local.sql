@@ -58,7 +58,7 @@ begin
   perform public._assert(v_bad is null, '두 번 적용 후 표마다 정책 4개 (발견: ' || coalesce(v_bad, '없음') || ')');
   perform public._assert_eq(
     (select count(*) from pg_trigger where tgname like '%\_updated\_at' and not tgisinternal),
-    6::bigint, '두 번 적용 후 updated_at 트리거 6개');
+    7::bigint, '두 번 적용 후 updated_at 트리거 7개');
 end $t$;
 
 do $t$ begin raise notice '[프로젝트] 함수 권한(proacl)'; end $t$;
@@ -102,6 +102,19 @@ begin
     (v_up, 'RM-1001', '예시원료 A', '원료', 1500), (v_up, 'RM-1001', '예시원료 A', '원료', 20);
   insert into public.stock_movement (upload_id, direction, code, date, qty) values (v_mv, 'inbound', 'RM-1001', '2026-08-20', 300);
   insert into public.unit_price (upload_id, code, price, date) values (v_pr, 'RM-1001', 3200, '2026-01-01');
+  -- 같은 자리에 공장별 파일 두 개(part_key 가 다름)
+  insert into public.upload_slot (slot_id, part_key, plant, file_name) values ('rawPrev', 'plant:인천', '인천', '본사.xlsx');
+  insert into public.upload_slot (slot_id, part_key, plant, file_name) values ('rawPrev', 'plant:대구', '대구', '대구.xlsx');
+  perform public._assert_eq((select count(*) from public.upload_slot where slot_id = 'rawPrev'), 2::bigint,
+    '같은 자리에 공장별 파일 두 개를 둘 수 있다(part_key)');
+  -- 증감 원인 메모 upsert
+  insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'raw', '하우징류', '첫 메모')
+    on conflict (owner_id, memo_key, kind, group_name) do update set memo = excluded.memo;
+  insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'raw', '하우징류', '고친 메모')
+    on conflict (owner_id, memo_key, kind, group_name) do update set memo = excluded.memo;
+  perform public._assert_eq((select memo from public.cause_memo), '고친 메모'::text, 'cause_memo upsert 가 덮어쓴다(한 행)');
+  perform public._assert_eq((select agg from (select string_agg(aging_months || '/' || over_months || '/' || dead_months, '') as agg from public.app_settings) q),
+    '3, 6, 12/6/12'::text, '새로 만든 기준 설정은 개월 처음 값 3, 6, 12 / 6 / 12');
 
   perform public._assert_eq((select count(*) from public.stock_item), 2::bigint,
     'A 는 자기 재고 레코드 2건을 본다 (같은 품번 여러 줄 허용)');
@@ -125,7 +138,7 @@ set request.jwt.claim.sub = 'bbbbbbbb-0000-0000-0000-000000000002';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
     perform public._assert_rows(format('update public.%I set updated_at = now()', t), 0, 'B 는 A 의 ' || t || ' 를 못 고친다');
@@ -163,7 +176,7 @@ set request.jwt.claim.sub = '';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;
@@ -196,8 +209,20 @@ begin
     '23514', '없는 자리 이름(slot_id)은 CHECK 가 막는다');
   perform public._assert_raises(format('insert into public.column_mapping (owner_id, def_key) values (%L, %L)', a, 'unknown'),
     '23514', '없는 자료 종류(def_key)는 CHECK 가 막는다');
-  perform public._assert_raises(format('insert into public.app_settings (owner_id, over_days, dead_days) values (%L, 400, 300)', gen_random_uuid()),
-    '23514', '불용 기준 < 과잉 기준은 CHECK 가 막는다');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, over_months, dead_months) values (%L, 13, 12)', gen_random_uuid()),
+    '23514', '불용 기준(개월) < 과잉 기준(개월)은 CHECK 가 막는다');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, aging_months) values (%L, %L)', gen_random_uuid(), '3, 6.5'),
+    '23514', 'Aging 구간은 정수 개월만');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, plant_view) values (%L, %L)', gen_random_uuid(), '중국'),
+    '23514', '공장 보기는 합계·인천·대구만');
+  perform public._assert_raises(format('insert into public.upload_slot (owner_id, slot_id, part_key, plant, file_name) values (%L, %L, %L, %L, %L)', a, 'rawPrev', 'plant:인천', '인천', 'dup'),
+    '23505', '같은 자리·같은 공장 파일 두 번은 UNIQUE 가 막는다');
+  perform public._assert_raises(format('insert into public.upload_slot (owner_id, slot_id, part_key, plant, file_name) values (%L, %L, %L, %L, %L)', a, 'rawPrev', 'plant:중국', '중국', 'x'),
+    '23514', '중국공장 파일은 CHECK 가 막는다');
+  perform public._assert_raises(format('insert into public.stock_item (owner_id, upload_id, code, qty, plant) values (%L, %s, %L, 1, %L)', a, v_up, 'RM-8', '중국'),
+    '23514', '중국공장 재고 행은 CHECK 가 막는다');
+  perform public._assert_raises(format('insert into public.cause_memo (owner_id, memo_key, kind, group_name) values (%L, %L, %L, %L)', a, 'k', 'semi', 'g'),
+    '23514', '증감 원인 메모 종류는 raw/product 만');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, cur_date, prev_date) values (%L, %L, %L)', gen_random_uuid(), '2026-07-31', '2026-08-31'),
     '23514', '전월 기준일이 당월보다 늦으면 CHECK 가 막는다');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, no_out_policy) values (%L, %L)', gen_random_uuid(), 'guess'),

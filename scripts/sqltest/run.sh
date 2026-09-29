@@ -61,10 +61,19 @@ if [ -f "$ROOT/scripts/sqltest/20_project.local.sql" ]; then
   "${PSQL[@]}" -f "$ROOT/scripts/sqltest/20_project.local.sql" 2>&1 | sed 's/^psql:.*NOTICE:  //'
 fi
 
-echo "⑥ 운영 가드 — 운영 흔적(authenticator 역할·graphql 스키마)이 보이면 검증 SQL 이 멈추는가"
+echo "⑥ 예전 판(일 단위) 위에 새 schema.sql 을 다시 실행 — 칸 추가·개월 변환"
+"$PGBIN/createdb" -h "$PGSOCK" -U postgres sqltest_up
+PSQL_UP=("$PGBIN/psql" -h "$PGSOCK" -U postgres -d sqltest_up -v ON_ERROR_STOP=1 -q)
+"${PSQL_UP[@]}" -f "$ROOT/scripts/sqltest/00_supabase_stub.local.sql" >/dev/null
+"${PSQL_UP[@]}" -f "$ROOT/scripts/sqltest/v1_schema.local.sql" >/dev/null 2>&1
+"${PSQL_UP[@]}" -f "$ROOT/scripts/sqltest/30_upgrade.local.sql"
+"${PSQL_UP[@]}" -f "$ROOT/supabase/schema.sql" 2>&1 | grep -v NOTICE || true
+"${PSQL_UP[@]}" -v phase_check=1 -f "$ROOT/scripts/sqltest/30_upgrade.local.sql" 2>&1 | sed 's/^psql:.*NOTICE:  //'
+
+echo "⑦ 운영 가드 — 운영 흔적(authenticator 역할·graphql 스키마)이 보이면 검증 SQL 이 멈추는가"
 for probe in "create role authenticator nologin" "create schema graphql"; do
   "${PSQL[@]}" -c "$probe"
-  for f in 00_supabase_stub 10_common 20_project; do
+  for f in 00_supabase_stub 10_common 20_project 30_upgrade v1_schema; do
     # 다른 이유로 실패한 것을 가드로 착각하지 않도록 가드 문구까지 확인한다
     if out="$("${PSQL[@]}" -f "$ROOT/scripts/sqltest/$f.local.sql" 2>&1)" \
        || ! grep -q '로컬 검증 전용' <<<"$out"; then
@@ -72,7 +81,7 @@ for probe in "create role authenticator nologin" "create schema graphql"; do
       exit 1
     fi
   done
-  echo "  OK   $probe → 00·10·20 모두 거부"
+  echo "  OK   $probe → 00·10·20·30·v1 모두 거부"
   "${PSQL[@]}" -c "drop role if exists authenticator; drop schema if exists graphql"
 done
 

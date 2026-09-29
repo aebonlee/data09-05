@@ -1,6 +1,7 @@
 // 예시 데이터 파일 생성: node scripts/make-samples.js
-// js/sample-data.js(가상 데이터)를 samples/ 에 CSV 7개와 xlsx 1개(시트 7개)로 씁니다.
-// 쓴 파일을 앱과 같은 방식으로 다시 읽어 원본과 같은지 확인합니다.
+// js/sample-data.js(가상 데이터)를 samples/ 에 통합문서 3개(xlsx)와 이력 CSV 2개로 씁니다.
+// 실데이터(인천 본사·대구 재고분석, 기준정보관리)의 열 구조만 흉내 낸 가상 값입니다.
+// 쓴 파일을 앱과 같은 방식(시트 짐작·머리행 짐작·짝 짐작·공장 짐작)으로 다시 읽어 원본과 같은지 확인합니다.
 const fs = require('fs');
 const path = require('path');
 const XLSX = require('../vendor/xlsx.full.min.js');
@@ -9,34 +10,45 @@ const Sample = require('../js/sample-data.js');
 
 const out = path.join(__dirname, '..', 'samples');
 fs.mkdirSync(out, { recursive: true });
-const t = Sample.build();
+// 예전 형식 예시 파일(자리별 CSV 7개 + 자료모음 xlsx)은 지웁니다
+for (const f of fs.readdirSync(out)) if (/^예시데이터_/.test(f.normalize('NFC'))) fs.unlinkSync(path.join(out, f));
 
 function csvCell(v) { const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
-const wb = XLSX.utils.book_new();
-const sheetName = { rawCur: '원자재_당월', rawPrev: '원자재_전월', prodCur: '제품_당월', prodPrev: '제품_전월', inbound: '입고이력', outbound: '출고이력', price: '단가표' };
-for (const slot of L.SLOTS) {
-  const aoa = t[slot.id];
+const wbs = Sample.workbooks();
+for (const [name, sheets] of Object.entries(wbs)) {
+  const wb = XLSX.utils.book_new();
+  for (const [sn, aoa] of Object.entries(sheets)) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), sn);
+  fs.writeFileSync(path.join(out, name), XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' }));
+}
+for (const [name, aoa] of Object.entries(Sample.histories())) {
   // 엑셀에서 한글이 깨지지 않도록 UTF-8 BOM 을 붙입니다
-  fs.writeFileSync(path.join(out, Sample.FILE_NAMES[slot.id]), '﻿' + aoa.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), sheetName[slot.id]);
+  fs.writeFileSync(path.join(out, name), '﻿' + aoa.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
 }
-const xlsxName = '예시데이터_재고분석_자료모음.xlsx';
-fs.writeFileSync(path.join(out, xlsxName), XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' }));
 
-// 검증: CSV 와 xlsx 를 다시 읽어 짝짓기·레코드가 원본과 같은지
-function records(aoa, def) {
-  const tbl = L.tableToRows(aoa, 1);
-  return L.applyMapping(tbl.rows, L.guessMapping(tbl.headers, def), def).records;
+// 검증: 파일을 다시 읽어, 앱의 짐작 흐름으로 얻은 레코드가 원본 표에서 얻은 것과 같은지
+function readBook(file) {
+  const buf = fs.readFileSync(path.join(out, file));
+  let wb;
+  if (/\.csv$/.test(file)) { let t = buf.toString('utf8'); if (t.charCodeAt(0) === 0xFEFF) t = t.slice(1); wb = XLSX.read(t, { type: 'string', raw: true }); }
+  else wb = XLSX.read(buf, { type: 'buffer' });
+  const sheets = {};
+  wb.SheetNames.forEach(n => { sheets[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }); });
+  return { names: wb.SheetNames, sheets };
 }
-const back = XLSX.read(fs.readFileSync(path.join(out, xlsxName)), { type: 'buffer' });
+const plan = Sample.build();
+const month = { rawCur: 8, prodCur: 8, rawPrev: 7, prodPrev: 7 };
+let n = 0;
 for (const slot of L.SLOTS) {
-  const want = JSON.stringify(records(t[slot.id], slot.def));
-  let text = fs.readFileSync(path.join(out, Sample.FILE_NAMES[slot.id]), 'utf8');
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  const csv = XLSX.read(text, { type: 'string', raw: true });
-  const fromCsv = XLSX.utils.sheet_to_json(csv.Sheets[csv.SheetNames[0]], { header: 1, raw: true, defval: '' });
-  const fromXlsx = XLSX.utils.sheet_to_json(back.Sheets[sheetName[slot.id]], { header: 1, raw: true, defval: '' });
-  if (JSON.stringify(records(fromCsv, slot.def)) !== want) { console.error('CSV 왕복 불일치: ' + slot.id); process.exit(1); }
-  if (JSON.stringify(records(fromXlsx, slot.def)) !== want) { console.error('xlsx 왕복 불일치: ' + slot.id); process.exit(1); }
+  for (const part of plan[slot.id]) {
+    const book = readBook(part.fileName);
+    const sheet = month[slot.id] ? L.guessSheet(book.names, slot.id, month[slot.id]).name : book.names[0];
+    if (month[slot.id] && sheet !== part.sheetName) { console.error('시트 짐작 불일치: ' + slot.id + ' ' + part.fileName + ' → ' + sheet); process.exit(1); }
+    const opt = { plant: L.plantFromFileName(part.fileName), avoidMonth: month[slot.id] ? (month[slot.id] === 8 ? 7 : 8) : null };
+    const a = L.importTable(book.sheets[sheet], slot.def, opt);
+    const b = L.importTable(part.aoa, slot.def, opt);
+    if (a.missing.length) { console.error('필수 칸 짝 없음: ' + slot.id + ' ' + part.fileName + ' ' + a.missing); process.exit(1); }
+    if (JSON.stringify(a.records) !== JSON.stringify(b.records)) { console.error('왕복 불일치: ' + slot.id + ' ' + part.fileName); process.exit(1); }
+    n++;
+  }
 }
-console.log('samples/ 생성·왕복 확인 완료: CSV ' + L.SLOTS.length + '개, ' + xlsxName);
+console.log('samples/ 생성·왕복 확인 완료: 통합문서 ' + Object.keys(wbs).length + '개, CSV 2개, 자리별 파일 ' + n + '건');

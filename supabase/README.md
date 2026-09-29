@@ -15,12 +15,13 @@
 
 | 이름 | 용도 | localStorage 대응 |
 |---|---|---|
-| `app_settings` | 기준 설정 — 당월·전월 기준일, Aging 구간, 과잉·불용 일수, 출고 이력 없는 품목 처리, 금액 기준, 증가 상위 건수, 저회전 기준. 사용자당 1행 | `data09-05.settings` |
+| `app_settings` | 기준 설정 — 당월·전월 기준일, Aging 구간·과잉·불용 **개월**, 출고 이력 없는 품목 처리, 금액 기준, 증가 상위 건수, 저회전 기준, 증감 원인 상위 건수, 원자재 대분류 묶음표, 공장 보기. 사용자당 1행 | `data09-05.settings` |
 | `column_mapping` | 자료 종류(원자재 재고·제품 재고·입고·출고·단가)별 컬럼 짝. 다음 달 파일에 그대로 씁니다 | `data09-05.map.<종류>` |
-| `upload_slot` | 올린 파일 한 벌. 자리 7개(원자재·제품 × 당월·전월, 입고, 출고, 단가)마다 1행. 파일 이름, 읽은 행 수, 건너뛴 행 사유 | `data09-05.data` 의 자리별 항목 |
-| `stock_item` | 월말 재고 레코드 — 품번, 품명, 대분류(원자재) 또는 고객사(제품), 재고수량, 재고금액 | `data.rawCur`·`rawPrev`·`prodCur`·`prodPrev` 의 `records` |
+| `upload_slot` | 올린 파일 하나. 자리 7개(원자재·제품 × 당월·전월, 입고, 출고, 단가) × 공장(인천·대구)마다 1행(`part_key`). 파일 이름, 공장, 읽은 행 수, 건너뛴 행 사유 | `data09-05.data` 의 자리별 `parts` |
+| `stock_item` | 월말 재고 레코드 — 품번, 품명, 대분류(원자재) 또는 고객사(제품), 재고수량, 재고금액·단가, 당월 입고·출고 수량, 파일의 경과 개월, 공장 | `data.rawCur`·`rawPrev`·`prodCur`·`prodPrev` 의 `records` |
 | `stock_movement` | 입고·출고 이력 레코드 — 품번, 날짜, 수량 | `data.inbound`·`outbound` 의 `records` |
-| `unit_price` | 단가표 레코드 — 품번, 단가, 적용일 | `data.price` 의 `records` |
+| `unit_price` | 단가표·품목 기준정보 레코드 — 품번, 단가, 적용일, 품명, 대분류 | `data.price` 의 `records` |
+| `cause_memo` | 증감 원인 메모·AI 해설 — 기준일·공장 보기·종류·대분류(고객사)마다 1행 | `data09-05.memo.<기준일>.<보기>` |
 
 필드 이름은 도구의 이름을 그대로 따릅니다. 다만 대분류·고객사를 담는 `group` 은 PostgreSQL 예약어라 `group_name` 으로 적었습니다.
 
@@ -41,9 +42,11 @@
 
 여러 번 실행해도 안전합니다. 이미 있는 표는 건너뛰고, 정책과 트리거는 지우고 다시 만듭니다.
 
+**2026-09-28 판을 이미 실행했다면** 새 `schema.sql` 을 그대로 한 번 더 실행하면 됩니다. 1-B 절이 새 칸(개월·공장 등)을 더하고, 저장돼 있던 일 단위 설정(예: 90·180·365일)을 개월(3·6·12)로 바꿉니다. 예전 일 단위 칸은 지우지 않고 남겨 둡니다.
+
 ## 확인 방법
 
-- **Table Editor** 에 표 6개(`app_settings`, `column_mapping`, `upload_slot`, `stock_item`, `stock_movement`, `unit_price`)가 보이면 됩니다.
+- **Table Editor** 에 표 7개(`app_settings`, `column_mapping`, `upload_slot`, `stock_item`, `stock_movement`, `unit_price`, `cause_memo`)가 보이면 됩니다.
 - 표마다 **RLS enabled** 표시가 있는지 확인합니다.
 - SQL Editor 에서 아래를 실행해 정책이 표마다 4개(조회·추가·수정·삭제)인지 봅니다.
 
@@ -54,7 +57,7 @@ select tablename, count(*) from pg_policies where schemaname = 'public' group by
 ## 앱 연결은 다음 단계입니다
 
 이 스크립트는 표를 준비해 두는 것까지입니다. 도구의 `js/store.js` 를 Supabase 에 읽고 쓰도록 바꾸는 일, 로그인 화면을 붙이는 일은 다음 단계에서 합니다.
-그때 컬럼 짝과 자리 저장은 upsert 로 하고, 충돌 기준을 `owner_id,def_key`·`owner_id,slot_id` 로 지정해야 중복 행이 생기지 않습니다.
+그때 컬럼 짝과 자리 저장은 upsert 로 하고, 충돌 기준을 `owner_id,def_key`·`owner_id,slot_id,part_key`·`owner_id,memo_key,kind,group_name` 으로 지정해야 중복 행이 생기지 않습니다.
 
 ## 로컬 검증 방법
 
@@ -64,5 +67,5 @@ select tablename, count(*) from pg_policies where schemaname = 'public' group by
 ./scripts/sqltest/run.sh
 ```
 
-임시 데이터베이스를 만들어 `schema.sql` 을 두 번 적용하고, 사용자 A·B 격리, 비로그인 차단, 제약 조건, 함수 권한을 검사한 뒤 지웁니다. 마지막에 「SQL 검증 통과.」가 나오면 됩니다.
+임시 데이터베이스를 만들어 `schema.sql` 을 두 번 적용하고, 사용자 A·B 격리, 비로그인 차단, 제약 조건, 함수 권한을 검사합니다. 이어서 예전 판(`v1_schema.local.sql`, 일 단위) 위에 새 `schema.sql` 을 실행해 칸 추가·개월 변환을 검사한 뒤 지웁니다. 마지막에 「SQL 검증 통과.」가 나오면 됩니다.
 `scripts/sqltest/` 의 `*.local.sql` 파일은 검증 전용이라 Supabase SQL Editor 에서 실행하면 스스로 멈춥니다.
