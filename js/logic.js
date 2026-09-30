@@ -158,6 +158,10 @@
       salesScope: 'prod',
       reconTolerance: 1,    // 보고서 대조: 이 금액(원) 이하 차이는 알람 없음(수량은 0.5 — 보고서 수량이 정수로 표시돼 소수 수량 반올림 차이는 뺌)
       plantAlias: '',       // 보고서 구역 이름 → 공장 (한 줄에 「구역이름=대구」). 회사 고유 이름이라 처음 값은 비워 둡니다
+      // 보고서 칸 단위(2026-09-30 답변 「단위가 다릅니다」): 보고서 값이 도구(원) 값과 단위가 다른 칸을 적습니다.
+      // 한 줄에 「대구 반제품 7월 금액=×10」(보고서 = 도구 × 10) 또는 「인천 * 금액=천원」(보고서가 천원 단위).
+      // 적지 않아도 정확히 10·100·1000…배(또는 그 역수) 차이는 「단위 차이」로 따로 보이고 알람에는 올리지 않습니다.
+      reconUnits: '',
       overEnabled: '',      // 과잉 구간 쓰기(기본 끔). 'on' 이면 경과 개월이 overMonths 를 넘고 장기재고 미만인 품목을 「과잉」
       overMonths: 6,
       noOutPolicy: 'inbound', // 출고 이력 없는 품목: inbound=입고일로 대신, none=판정 보류
@@ -677,6 +681,71 @@
     });
     return out;
   }
+  // 보고서 칸 단위 설정 읽기. 왼쪽 = 공장·구분·달·항목(빠진 것은 모두), 오른쪽 = 배수(보고서 값 ÷ 도구 값).
+  //   「×10」「10배」「10」 → 10 (보고서가 10배 크게 적힘)
+  //   「원」「10원」「100원」「천원」「만원」「백만원」 → 보고서 금액의 단위 → 배수 1 · 0.1 · 0.01 · 0.001 · 0.0001 · 0.000001
+  var UNIT_WORDS = { '원': 1, '10원': 10, '십원': 10, '100원': 100, '백원': 100, '천원': 1000, '1000원': 1000, '만원': 10000, '백만원': 1000000 };
+  function parseUnitFactor(v) {
+    var t = String(v == null ? '' : v).replace(/\s+/g, '').replace(/,/g, '');
+    if (!t) return null;
+    if (Object.prototype.hasOwnProperty.call(UNIT_WORDS, t)) return 1 / UNIT_WORDS[t];
+    var m = t.match(/^(?:[x×*])?(\d+(?:\.\d+)?)배?$/i) || t.match(/^[÷\/](\d+(?:\.\d+)?)$/);
+    if (!m) return null;
+    var f = Number(m[1]);
+    if (!(f > 0)) return null;
+    return /^[÷\/]/.test(t) ? 1 / f : f;
+  }
+  function parseReconUnits(text) {
+    var out = { rules: [], errors: [] };
+    String(text == null ? '' : text).split(/\r?\n/).forEach(function (line, i) {
+      var t = line.trim();
+      if (!t || t.charAt(0) === '#') return;
+      var eq = t.lastIndexOf('=');
+      var f = eq > 0 ? parseUnitFactor(t.slice(eq + 1)) : null;
+      if (eq <= 0 || f == null) { out.errors.push((i + 1) + '번째 줄은 「대구 반제품 7월 금액=×10」 또는 「인천 * 금액=천원」 형식이어야 합니다.'); return; }
+      var rule = { plant: '', kind: '', month: null, field: '', factor: f, line: t };
+      var bad = '';
+      t.slice(0, eq).split(/[\s|,·]+/).forEach(function (w) {
+        if (!w || w === '*' || w === '전체' || w === '모두') return;
+        var mo = w.match(/^(\d{1,2})월$/);
+        if (mo && +mo[1] >= 1 && +mo[1] <= 12) rule.month = +mo[1];
+        else if (REPORT_KIND[w]) rule.kind = REPORT_KIND[w];
+        else if (w === '금액' || w === '수량') rule.field = w;
+        else if (isPlant(normalizePlant(w))) rule.plant = normalizePlant(w);
+        else bad = bad || w;
+      });
+      if (bad) { out.errors.push((i + 1) + '번째 줄의 「' + bad + '」를 알 수 없습니다(공장·원자재/반제품/제품·N월·금액/수량).'); return; }
+      out.rules.push(rule);
+    });
+    return out;
+  }
+  // 칸에 맞는 단위 규칙 — 조건을 더 많이 적은 줄이 먼저, 같으면 뒤에 적은 줄
+  function unitRuleFor(rules, plant, kind, month, field) {
+    var best = null, bestN = -1;
+    (rules || []).forEach(function (r) {
+      if ((r.plant && r.plant !== plant) || (r.kind && r.kind !== kind) || (r.month && r.month !== month) || (r.field && r.field !== field)) return;
+      var n = (r.plant ? 1 : 0) + (r.kind ? 1 : 0) + (r.month ? 1 : 0) + (r.field ? 1 : 0);
+      if (n >= bestN) { best = r; bestN = n; }
+    });
+    return best;
+  }
+  // 배수 표시: 10 → 「×10」, 0.001 → 「÷1,000(천원 단위)」
+  function factorLabel(f) {
+    if (f >= 1) return '×' + String(round(f, 6)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    var inv = round(1 / f, 6);
+    var word = Object.keys(UNIT_WORDS).filter(function (k) { return UNIT_WORDS[k] === inv && !/^\d/.test(k); })[0];
+    return '÷' + String(inv).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (word ? '(' + word + ' 단위)' : '');
+  }
+  // 보고서 값이 도구 값의 정확히 10의 거듭제곱 배(×10 ~ ×1,000,000 또는 그 역수)인지 — 반올림 오차(보고서 단위의 절반)까지 허용
+  var UNIT_FACTORS = [10, 100, 1000, 10000, 100000, 1000000, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001];
+  function detectUnitFactor(report, tool, tol) {
+    if (report == null || tool == null || !report || !tool || (report > 0) !== (tool > 0)) return null;
+    for (var i = 0; i < UNIT_FACTORS.length; i++) {
+      var f = UNIT_FACTORS[i];
+      if (Math.abs(report / f - tool) <= Math.max(tol, 0.5 / f) + 1e-9) return f;
+    }
+    return null;
+  }
   function checkSettings(s) {
     var errors = [];
     var cur = parseDate(s.curDate);
@@ -693,6 +762,8 @@
     if (tol == null || isNaN(tol) || tol < 0) errors.push('보고서 대조 허용 차이를 0 이상 숫자로 입력해 주세요.');
     var alias = parsePlantAlias(s.plantAlias);
     if (alias.errors.length) errors.push('보고서 구역 이름 ' + alias.errors[0]);
+    var units = parseReconUnits(s.reconUnits);
+    if (units.errors.length) errors.push('보고서 칸 단위 ' + units.errors[0]);
     if (!isInt(maxM, 1, 36)) errors.push('개월별 분포 최대 개월은 1~36 사이 정수로 입력해 주세요.');
     if (overOn && !isInt(over, 0)) errors.push('과잉 기준 개월을 0 이상 정수로 입력해 주세요.');
     var topN = toNumber(s.topN);
@@ -709,7 +780,7 @@
       cur: cur, prev: prev, agingMax: maxM, longRaw: longRaw, longProd: longProd,
       longRawOp: s.longRawOp === 'ge' ? 'ge' : 'gt', longProdOp: s.longProdOp === 'gt' ? 'gt' : 'ge',
       agingPath: s.agingPath === 'file' ? 'file' : 'out', salesScope: s.salesScope === 'all' ? 'all' : 'prod',
-      reconTolerance: tol, plantAlias: alias.map,
+      reconTolerance: tol, plantAlias: alias.map, reconUnits: units.rules,
       overMonths: overOn ? over : null, topN: topN, turnoverMax: tm, causeTopN: ctn,
       groupMap: gm, groupOthers: s.groupOthers === 'keep' ? 'keep' : 'other',
       plantView: isPlant(pv) ? pv : '',
@@ -1173,7 +1244,7 @@
   //  대분류·고객사 줄의 차이 = 참고(대분류 묶음·고객사 표기가 달라 생길 수 있어 알람으로 올리지 않음)
   // ack: 사람이 「확인함」으로 표시한 차이 { key: true } — 알람에서 빼고 「확인함」으로 남깁니다
   function reconcile(res, files, s, ack) {
-    var out = { hasReport: !!(files && files.length), compared: 0, alarms: [], acked: [], infos: [], unresolved: [], tolerance: s.reconTolerance };
+    var out = { hasReport: !!(files && files.length), compared: 0, alarms: [], acked: [], infos: [], units: [], unresolved: [], tolerance: s.reconTolerance };
     if (!out.hasReport) return out;
     var curM = s.cur.getMonth() + 1, prevM = s.prev.getMonth() + 1;
     var seen = {};
@@ -1207,7 +1278,29 @@
                 diff: tv == null ? null : round(tv - rv[fd[1]], 2), file: f.fileName, sheet: sec.sheet };
               out.compared++;
               if (tv == null) { item.note = '도구에 없는 ' + (sec.kind === 'raw' ? '대분류' : '고객사'); out.infos.push(item); return; }
-              if (Math.abs(item.diff) <= fd[2]) return;
+              // 보고서 칸 단위(설정): 보고서 값 ÷ 배수 = 도구 단위(원·개)로 바꿔 비교. 반올림 오차는 보고서 단위의 절반까지
+              var rule = unitRuleFor(s.reconUnits, plant, sec.kind, m, fd[0]);
+              if (rule && rule.factor !== 1) {
+                var conv = rv[fd[1]] / rule.factor;
+                item.factor = rule.factor; item.reportConv = round(conv, 2); item.diff = round(tv - conv, 2);
+                if (Math.abs(item.diff) <= Math.max(fd[2], 0.5 / rule.factor)) {
+                  item.unitSource = 'setting'; item.note = '단위 설정 ' + factorLabel(rule.factor) + ' 적용 — 단위를 맞추면 같음';
+                  if (row.total) out.units.push(item);   // 대분류·고객사 줄은 맞으면 따로 적지 않습니다
+                  return;
+                }
+                item.note = '단위 설정 ' + factorLabel(rule.factor) + ' 적용 후에도 차이';
+              } else if (Math.abs(item.diff) <= fd[2]) return;
+              else if (!rule) {
+                // 설정이 없어도 정확히 10·100·1000…배 차이면 「단위 차이」(오류 알람이 아님)
+                var uf = detectUnitFactor(rv[fd[1]], tv, fd[2]);
+                if (uf) {
+                  item.factor = uf; item.unitSource = 'auto'; item.reportConv = round(rv[fd[1]] / uf, 2);
+                  item.suggest = plant + ' ' + KIND_LABEL[sec.kind] + ' ' + m + '월 ' + fd[0] + '=' + (uf >= 1 ? '×' + uf : '÷' + round(1 / uf, 6));
+                  item.note = '단위 차이(보고서 = 도구 ' + factorLabel(uf) + ')';
+                  if (row.total) { out.units.push(item); return; }
+                  out.infos.push(item); return;
+                }
+              }
               if (!row.total) { out.infos.push(item); return; }
               if (ack[key]) { item.acked = true; out.acked.push(item); } else out.alarms.push(item);
             });
@@ -1280,6 +1373,20 @@
   }
 
   // ── 판매현황(출고) 여러 파일 ─────────────────────────────────
+  // 새로 읽은 파일을 기존 목록에 합칩니다. 같은 이름이거나 제목 기간(예: 2026/09/01 ~ 2026/09/30)이 같은 파일은 바꿔 넣습니다 —
+  // 월 중간분(26.09, 9/29 출력)을 월말까지 다시 내려받으면 파일 이름이 달라도 같은 달 파일로 보고 교체합니다(2026-09-30 답변 2).
+  // 예시 파일(sample)은 실제 파일을 올리면 뺍니다. 돌려주는 값: { files, replaced: [{ from, to }] }
+  function mergeSalesFiles(existing, added) {
+    var replaced = [];
+    function period(f) { return f.titleFrom && f.titleTo ? f.titleFrom + '~' + f.titleTo : ''; }
+    var keep = (existing || []).filter(function (f) {
+      if (f.sample) return false;
+      var hit = (added || []).filter(function (a) { return a.fileName === f.fileName || (period(a) && period(a) === period(f)); })[0];
+      if (hit) { replaced.push({ from: f.fileName, to: hit.fileName, fromPartial: !!f.partial, toPartial: !!hit.partial }); return false; }
+      return true;
+    });
+    return { files: keep.concat(added || []), replaced: replaced };
+  }
   // 2026-09-29 받은 판매현황 22개(25.01~26.09, 파일당 4~9MB) 구조: 1행 제목 「회사명 : … / 2025/01/01 ~ 2025/01/31」,
   // 2행 머리행(주문일자·프로젝트명·판매일자·대분류·품목코드·품목명(규격)·수량·단가·공급가액·거래처명 …),
   // 판매일자는 「2025/01/02 -1」(날짜 + 전표 순번), 맨 아래 「2025/01  계」「총합계」 줄과 출력 일시 줄. 공장 칸은 없습니다.
@@ -1585,7 +1692,8 @@
     return out.length ? out : [{ title: '합계', det: res, plant: '' }];
   }
   function alarmRows(recon, withInfo) {
-    var list = recon.alarms.map(function (a) { return [a, '차이']; }).concat(recon.acked.map(function (a) { return [a, '확인함']; }));
+    var list = recon.alarms.map(function (a) { return [a, '차이']; }).concat(recon.acked.map(function (a) { return [a, '확인함']; }),
+      (recon.units || []).map(function (a) { return [a, '단위 차이']; }));
     if (withInfo) list = list.concat(recon.infos.map(function (a) { return [a, '참고']; }));
     return list.map(function (x) {
       var a = x[0];
@@ -1615,8 +1723,8 @@
     var rc = res.recon || { hasReport: false, alarms: [], acked: [], infos: [] };
     rows.push(['대조 차이 알람 — 회사 보고서의 합계 줄과 도구 계산 비교']);
     if (!rc.hasReport) rows.push(['보고서 대조 자료 없음 — 「자료」의 「회사 보고서(대조용)」 자리에 월간 재고분석 통합문서를 올리면 합계를 맞대 봅니다.']);
-    else if (!rc.alarms.length && !rc.acked.length) rows.push(['차이 없음 — 비교한 ' + rc.compared + '개 값이 허용 차이(금액 ' + rc.tolerance + '원) 안입니다.']);
-    else { rows.push(['차이 ' + rc.alarms.length + '건' + (rc.acked.length ? ', 확인함 ' + rc.acked.length + '건' : '')]); rows.push(ALARM_HEAD); rows = rows.concat(alarmRows(rc, false)); }
+    else if (!rc.alarms.length && !rc.acked.length && !(rc.units || []).length) rows.push(['차이 없음 — 비교한 ' + rc.compared + '개 값이 허용 차이(금액 ' + rc.tolerance + '원) 안입니다.']);
+    else { rows.push(['차이 ' + rc.alarms.length + '건' + (rc.acked.length ? ', 확인함 ' + rc.acked.length + '건' : '') + ((rc.units || []).length ? ', 단위 차이 ' + rc.units.length + '건(알람 아님)' : '')]); rows.push(ALARM_HEAD); rows = rows.concat(alarmRows(rc, false)); }
     return rows;
   }
   function rawReportSheet(res, memosByPlant) {
@@ -1728,7 +1836,8 @@
 
   var api = {
     KINDS: KINDS, KIND_LABEL: KIND_LABEL, scanSales: scanSales, readSalesWorkbook: readSalesWorkbook, sheetRows: sheetRows, salesHeaderDiff: salesHeaderDiff, salesIndex: salesIndex, salesCoverage: salesCoverage,
-    parseReportBook: parseReportBook, reconcile: reconcile, parsePlantAlias: parsePlantAlias, isLong: isLong, longLabel: longLabel, overLabel: overLabel,
+    parseReportBook: parseReportBook, reconcile: reconcile, parsePlantAlias: parsePlantAlias,
+    parseReconUnits: parseReconUnits, parseUnitFactor: parseUnitFactor, detectUnitFactor: detectUnitFactor, factorLabel: factorLabel, mergeSalesFiles: mergeSalesFiles, isLong: isLong, longLabel: longLabel, overLabel: overLabel,
     bucketSummary: bucketSummary, isOpenAging: isOpenAging, cellValue: cellValue, STOCK_SLOT: STOCK_SLOT,
     DEFS: DEFS, SLOTS: SLOTS, PLANTS: PLANTS, EXCLUDED_PLANTS: EXCLUDED_PLANTS, EFFECT_KEYS: EFFECT_KEYS, EFFECT_LABELS: EFFECT_LABELS,
     defaultSettings: defaultSettings, daysToMonths: daysToMonths, migrateSettings: migrateSettings, migrateSlotData: migrateSlotData,

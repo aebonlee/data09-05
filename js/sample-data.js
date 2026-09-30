@@ -16,6 +16,7 @@
  *    판매현황 파일(1행 「회사명 : … / 2026/07/01 ~ 2026/07/31」, 2행 머리행, 판매일자 「2026/07/03 -1」, 맨 아래 「계」「총합계」·출력 일시 줄),
  *    보고용 시트(「원자재」「반제품」「제품」 — 「○○기준」 구역, 「재고현황(07월)」 머리행)를 흉내 냈습니다.
  *    보고용 원자재 인천 7월 합계 금액은 차이 알람을 시연하려고 일부러 1,000원 다르게 적었습니다.
+ *    보고용 반제품 대구 7월 금액은 「단위 차이」를 시연하려고 일부러 10배로 적었습니다(실데이터에 같은 경우가 있음 — 2026-09-30 답변).
  */
 (function (root) {
   'use strict';
@@ -212,9 +213,10 @@
     out.push(['', '합계', t.pq, t.pa + (bump || 0), t.cq, t.ca, t.cq - t.pq, t.ca - t.pa - (bump || 0), '', '', '']);
     return out;
   }
-  function reportCust(list, plant, title, qiP, qiC, piP, piC, priceMul) {
+  function reportCust(list, plant, title, qiP, qiC, piP, piC, priceMul, prevMul) {
     var rows = list.filter(function (r) { return r[3] === plant; });
-    var p = sumBy(rows.map(function (r) { return r.slice(0, 7).concat([r[piP] == null ? null : r[piP] * priceMul]); }), function (r) { return r[4]; }, qiP, 7);
+    var pm = priceMul * (prevMul || 1);
+    var p = sumBy(rows.map(function (r) { return r.slice(0, 7).concat([r[piP] == null ? null : r[piP] * pm]); }), function (r) { return r[4]; }, qiP, 7);
     var c = sumBy(rows.map(function (r) { return r.slice(0, 7).concat([r[piC] == null ? null : r[piC] * priceMul]); }), function (r) { return r[4]; }, qiC, 7);
     var out = [[title], ['구분', '07월 재고현황', '', '08월 재고현황', '', '', '재고잔량분석'], ['', ' 수량', '금액', ' 수량', '금액', '']];
     var t = [0, 0, 0, 0];
@@ -230,7 +232,7 @@
     var title = plant === '인천' ? '본사기준' : '대구기준';
     return {
       '원자재': reportRaw(plant, title, plant === '인천' ? 1000 : 0),
-      '반제품': reportCust(SEMI, plant, title, 5, 6, 7, 8, 1),
+      '반제품': reportCust(SEMI, plant, title, 5, 6, 7, 8, 1, plant === '대구' ? 10 : 1),   // 대구 7월 금액 10배(단위 차이 시연)
       '제품': reportCust(PROD, plant, title, 5, 6, 7, 8, 1)
     };
   }

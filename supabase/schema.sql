@@ -56,6 +56,7 @@ create table if not exists public.app_settings (
   sales_scope      text not null default 'prod',      -- 판매현황 최근 출고일 적용 대상: prod = 반제품·제품 / all = 원자재까지
   recon_tolerance  numeric not null default 1,        -- 보고서 대조 허용 차이(원)
   plant_alias      text not null default '',          -- 보고서 구역 이름 → 공장(한 줄에 「구역이름=대구」)
+  recon_units      text not null default '',          -- 보고서 칸 단위(한 줄에 「대구 반제품 7월 금액=×10」, 2026-09-30)
   over_enabled   boolean not null default false,     -- 과잉 구간 쓰기(기본 끔)
   no_out_policy  text not null default 'inbound'
                  check (no_out_policy in ('inbound', 'none')),
@@ -299,6 +300,7 @@ alter table public.app_settings add column if not exists aging_path      text   
 alter table public.app_settings add column if not exists sales_scope     text    not null default 'prod';
 alter table public.app_settings add column if not exists recon_tolerance numeric not null default 1;
 alter table public.app_settings add column if not exists plant_alias     text    not null default '';
+alter table public.app_settings add column if not exists recon_units     text    not null default '';   -- 2026-09-30 보고서 칸 단위
 alter table public.app_settings alter column aging_max_months set default 36;
 alter table public.app_settings drop constraint if exists app_settings_round3_check;
 alter table public.app_settings add constraint app_settings_round3_check check (

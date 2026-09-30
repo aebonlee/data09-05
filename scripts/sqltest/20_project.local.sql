@@ -118,6 +118,7 @@ begin
     '12/6/36/false'::text, '장기재고 처음 값 원자재 12 · 반제품·제품 6 · 분포 36 · 과잉 끔');
   perform public._assert_eq((select long_raw_op || '/' || long_prod_op || '/' || aging_path || '/' || sales_scope || '/' || recon_tolerance from public.app_settings),
     'gt/ge/out/prod/1'::text, '3차 처음 값: 원자재 초과 · 반제품·제품 이상 · 최근 출고일 경로 · 판매현황 반제품·제품 · 허용 차이 1원');
+  perform public._assert_eq((select recon_units from public.app_settings), ''::text, '보고서 칸 단위 처음 값은 빈칸(설정 없으면 10배 차이만 자동으로 찾음)');
   -- 반제품 자리 · 판매현황 · 보고서 · 확인함
   insert into public.upload_slot (slot_id, part_key, plant, file_name) values ('semiCur', 'plant:인천', '인천', '본사.xlsx');
   insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'semi', '고객1', '반제품 메모');

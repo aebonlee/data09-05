@@ -426,7 +426,7 @@
     var card = h('section', { class: 'card sales-card', 'data-slot': 'sales' },
       h('h2', null, '판매현황(출고) 여러 파일 — 최근 출고일'),
       h('p', { class: 'note' }, '월별 판매현황 파일(예: 판매현황(25.01)~(26.09))을 한 번에 여러 개 골라 올려 주세요. 품목코드·판매일자·수량 칸만 읽어 품목별 최근 출고일을 구하고, 기준일 이전 가장 최근 출고일로 Aging 을 다시 계산합니다. 출고 이력이 없는 품목은 예전처럼 재고잔량분석 칸을 씁니다.'),
-      h('p', { class: 'note' }, '같은 이름의 파일을 다시 올리면 바꿔 넣습니다. 파일은 외부로 보내지 않습니다.'));
+      h('p', { class: 'note' }, '같은 이름이거나 제목 기간이 같은 파일(예: 월 중간분을 월말까지 다시 내려받은 파일)을 올리면 바꿔 넣습니다. 파일은 외부로 보내지 않습니다.'));
     var input = h('input', { type: 'file', multiple: true, accept: '.xlsx,.xls,.csv', 'aria-label': '판매현황 파일 여러 개 선택' });
     input.addEventListener('change', function () { var fs = [].slice.call(input.files || []); if (fs.length) loadSalesFiles(fs); });
     if (salesJob) {
@@ -459,7 +459,7 @@
       }
     }
     var partial = sales.filter(function (f) { return f.partial; });
-    if (partial.length) card.appendChild(h('p', { class: 'alert info' }, partial.map(function (f) { return f.fileName; }).join(', ') + ' — 제목 기간(' + partial[0].titleTo + '까지)보다 앞선 ' + partial[0].stampDate + ' 에 내려받은 파일이라 그 뒤 출고는 아직 없습니다(월 중간분).'));
+    if (partial.length) card.appendChild(h('p', { class: 'alert info' }, partial.map(function (f) { return f.fileName; }).join(', ') + ' — 제목 기간(' + partial[0].titleTo + '까지)보다 앞선 ' + partial[0].stampDate + ' 에 내려받은 파일이라 그 뒤 출고는 아직 없습니다(월 중간분). 지금은 이 기준으로 봅니다 — 마감 뒤 월말까지 다시 내려받아 올리면 같은 달 파일로 바꿔 넣습니다.'));
     if (diff.length) card.appendChild(h('div', { class: 'alert info' }, h('p', null, '열 구성이 다른 파일이 있습니다 — 파일마다 짝을 따로 잡아 읽었습니다.'),
       h('ul', null, diff.map(function (d) {
         return h('li', null, d.fileName + ': ' + [d.missing.length ? '없어진 열 ' + d.missing.join(', ') : '', d.added.length ? '새 열 ' + d.added.join(', ') : '',
@@ -548,14 +548,15 @@
     function finish() {
       if (worker) worker.terminate();
       var took = ((Date.now() - salesJob.started) / 1000).toFixed(1);
-      var names = results.map(function (f) { return f.fileName; });
-      sales = sales.filter(function (f) { return names.indexOf(f.fileName) < 0 && !f.sample; }).concat(results);
+      var merged = L.mergeSalesFiles(sales, results);
+      sales = merged.files;
+      var swapped = merged.replaced.filter(function (x) { return x.from !== x.to; });
       var okFile = results.filter(function (f) { return !f.missing.length; })[0];
       if (okFile) S.setMapping('outbound', okFile.mapping);
       salesJob = null;
       var stored = S.setSales(sales);
       render();
-      toast('판매현황 ' + results.length + '개를 ' + took + '초에 읽었습니다' + (errors.length ? ' — 읽지 못한 파일 ' + errors.length + '개: ' + errors[0] : '.') + (stored ? '' : ' 브라우저 저장 공간이 부족해 이번 창에서만 유지합니다.'), !!errors.length || !stored);
+      toast('판매현황 ' + results.length + '개를 ' + took + '초에 읽었습니다' + (errors.length ? ' — 읽지 못한 파일 ' + errors.length + '개: ' + errors[0] : '.') + (swapped.length ? ' 같은 기간 파일을 바꿔 넣었습니다: ' + swapped.map(function (x) { return x.from + ' → ' + x.to; }).join(', ') + '.' : '') + (stored ? '' : ' 브라우저 저장 공간이 부족해 이번 창에서만 유지합니다.'), !!errors.length || !stored);
     }
     next();
   }
@@ -650,7 +651,9 @@
       h('div', { class: 'form-grid' },
         num('reconTolerance', '허용 차이(원) — 이 금액 이하 차이는 알람 없음', '처음 값 1원. 수량은 0.5 이하 차이(소수 수량 반올림)를 뺍니다'),
         h('label', { class: 'field' }, h('span', null, '보고서 구역 이름 → 공장'), h('textarea', { name: 'plantAlias', rows: '3', placeholder: '예: ○○EO=대구' }, settings.plantAlias || ''),
-          h('small', { class: 'note' }, '보고용 시트의 「○○기준」 구역 이름에 인천·본사·대구가 없으면 한 줄에 「구역이름=대구」처럼 적어 주세요. 회사 고유 이름이라 처음 값은 비어 있고, 이 브라우저에만 저장됩니다.'))),
+          h('small', { class: 'note' }, '보고용 시트의 「○○기준」 구역 이름에 인천·본사·대구가 없으면 한 줄에 「구역이름=대구」처럼 적어 주세요. 회사 고유 이름이라 처음 값은 비어 있고, 이 브라우저에만 저장됩니다.')),
+        h('label', { class: 'field' }, h('span', null, '보고서 칸 단위'), h('textarea', { name: 'reconUnits', rows: '3', placeholder: '예: 대구 반제품 7월 금액=×10' }, settings.reconUnits || ''),
+          h('small', { class: 'note' }, '보고서 칸의 단위가 도구(원·개)와 다르면 한 줄에 「공장 구분 달 항목=배수」로 적어 주세요. 「×10」은 보고서 값이 10배로 적힌 칸, 「천원」은 천원 단위 칸입니다. 빠진 조건은 모두에 적용(예: 「인천 * 금액=천원」). 적지 않아도 정확히 10·100·1000배 차이는 「단위 차이」로 따로 보이고 알람에는 올리지 않습니다.'))),
       h('h2', null, '원자재 대분류 묶음표'),
       h('p', { class: 'note' }, 'ERP 대분류 코드를 보고서 대분류로 묶습니다. 한 줄에 「코드=보고서 대분류」. 품번으로 묶으려면 「품번:CI184-*=파크라케이블(CI184)」처럼 적습니다(품번 규칙이 먼저). 비우면 파일에 적힌 대분류 그대로 씁니다.'),
       h('div', { class: 'form-grid' },
@@ -676,7 +679,7 @@
       var next = {};
       Object.keys(L.defaultSettings()).forEach(function (k) {
         var el = form.elements[k];
-        next[k] = el ? (k === 'groupMap' || k === 'plantAlias' ? el.value : el.value.trim()) : settings[k];
+        next[k] = el ? (k === 'groupMap' || k === 'plantAlias' || k === 'reconUnits' ? el.value : el.value.trim()) : settings[k];
       });
       var chk = L.checkSettings(next);
       var box = form.querySelector('#settingsErrors');
@@ -1150,6 +1153,7 @@
       stat('비교한 값', fmt(rc.compared), '공장·구분·달·수량/금액'),
       stat('차이(알람)', fmt(rc.alarms.length), '합계 줄', rc.alarms.length ? 'down' : ''),
       stat('확인함', fmt(rc.acked.length), '알람에서 뺀 차이'),
+      stat('단위 차이', fmt(rc.units.length), '알람 아님 — 단위를 맞추면 같음'),
       stat('참고', fmt(rc.infos.length), '대분류·고객사 줄')));
     function rowsOf(list, status) {
       return list.map(function (a) {
@@ -1170,6 +1174,13 @@
     var head = ['공장', '구분', '줄', '달', '항목', n('보고서 값'), n('도구 값'), n('차이(도구 − 보고서)'), '보고서 파일', '상태', ''];
     wrap.appendChild(h('h2', null, '합계 줄 차이'));
     wrap.appendChild(table(head, rowsOf(rc.alarms, '차이').concat(rowsOf(rc.acked, '확인함')), { cls: 'wide', empty: '합계 줄은 모두 허용 차이 안입니다.' }));
+    wrap.appendChild(h('h2', null, '단위 차이 — 알람 아님'));
+    wrap.appendChild(h('p', { class: 'note' }, '보고서 값이 도구 값의 정확히 10·100·1000…배(또는 그 역수)인 칸, 또는 「기준 설정 → 보고서 칸 단위」에 적은 단위로 바꾸면 같은 칸입니다. 자동으로 찾은 칸은 「제안 설정」 줄을 기준 설정에 적으면 단위가 확정됩니다(그 뒤로 단위를 맞춰도 다르면 알람).'));
+    wrap.appendChild(table(['공장', '구분', '줄', '달', '항목', n('보고서 값'), n('도구 값'), n('보고서 값(단위 맞춤)'), '단위', '보고서 파일', '제안 설정'], rc.units.map(function (a) {
+      return h('tr', null, td(L.plantLabel(a.plant)), td(a.kindLabel), td(a.label), td(a.month + '월(' + a.period + ')'), td(a.field),
+        td(fmt(a.report), 'num'), td(fmt(a.tool), 'num'), td(fmt(a.reportConv), 'num'), td(L.factorLabel(a.factor) + (a.unitSource === 'auto' ? ' (자동으로 찾음)' : ' (설정)')),
+        td(a.file + (a.sheet ? ' [' + a.sheet + ']' : '')), td(a.suggest ? h('code', null, a.suggest) : ''));
+    }), { cls: 'wide', empty: '단위가 다른 칸이 없습니다.' }));
     wrap.appendChild(h('details', null, h('summary', null, '참고 — 대분류·고객사 줄 차이 ' + rc.infos.length + '건'),
       table(head, rowsOf(rc.infos, '참고'), { cls: 'wide', empty: '없습니다.' })));
     return wrap;

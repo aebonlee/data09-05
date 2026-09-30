@@ -43,6 +43,8 @@ begin
     raise exception 'FAIL  3차 칸(분포 36·원자재 초과·반제품·제품 이상·판매현황 반제품·제품) (실제 % / % / % / %)', r.aging_max_months, r.long_raw_op, r.long_prod_op, r.sales_scope;
   end if;
   raise notice '  OK   예전 설정 행: 분포 최대 12 → 36, 원자재 「초과」·반제품·제품 「이상」 칸이 더해진다';
+  if r.recon_units is distinct from '' then raise exception 'FAIL  예전 설정 행에 보고서 칸 단위(recon_units) 칸이 더해지지 않았다'; end if;
+  raise notice '  OK   예전 설정 행에 보고서 칸 단위 칸(빈칸)이 더해진다';
   insert into public.upload_slot (owner_id, slot_id, part_key, plant, file_name)
     values ('aaaaaaaa-0000-0000-0000-000000000001', 'semiCur', 'plant:인천', '인천', '반제품.xlsx');
   raise notice '  OK   예전 판 위에서도 반제품 자리(semiCur)를 쓸 수 있다';

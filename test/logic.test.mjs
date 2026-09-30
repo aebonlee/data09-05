@@ -697,6 +697,63 @@ test('analyze 가 대조 결과를 붙이고, 총괄 시트 아래와 「대조_
   assert.ok(sh['대조_차이알람'].some(x => String(x[9]).startsWith('참고')));
 });
 
+console.log('보고서 칸 단위 · 단위 차이 (2026-09-30 답변 「단위가 다릅니다」)');
+test('단위 배수 읽기: ×10·10배·10 → 10, 천원 → 0.001, ÷1000 → 0.001, 원 → 1, 모르는 값 → null', () => {
+  assert.deepEqual(['×10', '10배', '10', 'x100', '천원', '÷1000', '원', '백만원', '열배', ''].map(L.parseUnitFactor),
+    [10, 10, 10, 100, 0.001, 0.001, 1, 0.000001, null, null]);
+});
+test('단위 설정 줄: 공장·구분·달·항목(빠지면 모두), 틀린 줄은 오류', () => {
+  const u = L.parseReconUnits('대구 반제품 7월 금액=×10\n# 메모\n인천 * 금액=천원');
+  assert.deepEqual(u.rules.map(r => [r.plant, r.kind, r.month, r.field, r.factor]), [['대구', 'semi', 7, '금액', 10], ['인천', '', null, '금액', 0.001]]);
+  assert.equal(L.parseReconUnits('대구 반제품 금액').errors.length, 1);
+  assert.equal(L.parseReconUnits('대구 반품 금액=×10').errors.length, 1);
+  assert.equal(L.checkSettings({ ...settings, curDate: '2026-08-31', reconUnits: '대구 금액=열배' }).ok, false);
+});
+test('정확히 10의 거듭제곱 배만 단위 차이: 1000/100 → ×10, 1,235(천원)/1,234,567 → ÷1000, 1050/100·부호 다름·0 → 없음', () => {
+  assert.equal(L.detectUnitFactor(1000, 100, 1), 10);
+  assert.equal(L.detectUnitFactor(1235, 1234567, 1), 0.001);   // |1,235,000 − 1,234,567| = 433 ≤ 천원의 절반 500
+  assert.equal(L.detectUnitFactor(1050, 100, 1), null);
+  assert.equal(L.detectUnitFactor(-1000, 100, 1), null);
+  assert.equal(L.detectUnitFactor(1000, 0, 1), null);
+  assert.equal(L.factorLabel(10), '×10');
+  assert.equal(L.factorLabel(0.001), '÷1,000(천원 단위)');
+});
+// 인천 원자재 8월 합계 금액: 도구 1690, 보고서를 16900(정확히 10배)으로 바꾼 사본
+const repX10 = JSON.parse(JSON.stringify(rep));
+repX10.sections[0].rows.find(r => r.total).v[8].amt = 16900;
+test('설정 없이도 정확히 10배 차이는 알람이 아니라 「단위 차이」(제안 설정 줄과 함께)', () => {
+  const r = L.analyze(pdat, pset);
+  const rc = L.reconcile(r, [repX10], L.checkSettings(pset), {});
+  assert.equal(rc.alarms.length, 0);
+  assert.deepEqual(rc.units.map(u => [u.plant, u.label, u.month, u.field, u.factor, u.unitSource, u.reportConv, u.suggest]),
+    [['인천', '합계', 8, '금액', 10, 'auto', 1690, '인천 원자재 8월 금액=×10']]);
+});
+test('단위 설정 ×10 → 「단위 설정」으로 확정, ×100 이면 바꿔도 달라 알람, 「원」(배수 1)이면 자동 찾기 끄고 알람', () => {
+  const r = L.analyze(pdat, pset);
+  const on = L.reconcile(r, [repX10], L.checkSettings({ ...pset, reconUnits: '인천 원자재 8월 금액=×10' }), {});
+  assert.deepEqual([on.alarms.length, on.units.length, on.units[0].unitSource], [0, 1, 'setting']);
+  const wrong = L.reconcile(r, [repX10], L.checkSettings({ ...pset, reconUnits: '인천 원자재 8월 금액=×100' }), {});
+  assert.deepEqual(wrong.alarms.map(a => [a.label, a.month, a.diff, a.note]), [['합계', 8, 1521, '단위 설정 ×100 적용 후에도 차이']]);   // 1690 − 16900/100
+  const same = L.reconcile(r, [repX10], L.checkSettings({ ...pset, reconUnits: '인천 * 금액=원' }), {});
+  assert.deepEqual([same.alarms.length, same.units.length, same.alarms[0].diff], [1, 0, -15210]);
+});
+test('단위 차이는 엑셀 「대조_차이알람」 시트와 총괄 아래에 「단위 차이」로 나옴', () => {
+  const r = L.analyze({ ...pdat, report: [repX10] }, pset);
+  const sh = L.buildSheets(r, pset, false, {});
+  assert.ok(sh['대조_차이알람'].some(x => String(x[9]).startsWith('단위 차이')));
+  assert.ok(sh['총괄'].some(x => x[0] === '차이 0건, 단위 차이 1건(알람 아님)'));
+});
+
+console.log('판매현황 월 중간분 바꿔 넣기 (2026-09-30 답변 2)');
+test('같은 이름 또는 같은 제목 기간이면 바꿔 넣고, 기간이 다르면 더함(25.08 반달 파일 둘은 따로)', () => {
+  const f = (fileName, titleFrom, titleTo, partial) => ({ fileName, titleFrom, titleTo, partial });
+  const old = [f('판매현황(26.09).xlsx', '2026-09-01', '2026-09-30', true), f('판매현황(25.08-1).xlsx', '2025-08-01', '2025-08-15'), f('예시.xlsx', '', '', false)];
+  old[2].sample = true;
+  const m = L.mergeSalesFiles(old, [f('판매현황(26.09)_마감.xlsx', '2026-09-01', '2026-09-30', false), f('판매현황(25.08-2).xlsx', '2025-08-16', '2025-08-31')]);
+  assert.deepEqual(m.files.map(x => x.fileName), ['판매현황(25.08-1).xlsx', '판매현황(26.09)_마감.xlsx', '판매현황(25.08-2).xlsx']);
+  assert.deepEqual(m.replaced, [{ from: '판매현황(26.09).xlsx', to: '판매현황(26.09)_마감.xlsx', fromPartial: true, toPartial: false }]);
+});
+
 console.log('예시 데이터 (실데이터 열 구조를 흉내 낸 가상 값)');
 test('예시 파일이 시트·머리행·짝·공장 짐작으로 모두 읽히고 분석된다', () => {
   const plan = Sample.build();
@@ -742,6 +799,8 @@ test('예시 파일이 시트·머리행·짝·공장 짐작으로 모두 읽히
   const r3 = L.analyze({ ...out, report: reps }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV });
   assert.deepEqual(r3.recon.alarms.map(a => [a.plant, a.kindLabel, a.month, a.field, a.diff]), [['인천', '원자재', 7, '금액', -1000]]);
   assert.deepEqual(r3.recon.unresolved, []);
+  // 대구 반제품 7월 금액은 일부러 10배 → 알람이 아니라 단위 차이 1건
+  assert.deepEqual(r3.recon.units.map(u => [u.plant, u.kindLabel, u.month, u.field, u.factor]), [['대구', '반제품', 7, '금액', 10]]);
 });
 
 console.log(process.exitCode ? '\n실패 있음' : '\n전부 통과 (' + passed + '개)');
