@@ -478,14 +478,14 @@ test('인천 보기: 인천 것만(10, 금액 증감 +20)', () => {
 });
 
 console.log('엑셀 시트');
-test('시트 22개(10차 「입고_FIFO」 더함) — 보고용 4개(총괄·원자재·반제품·제품)가 맨 앞, 백데이터 표 시트는 머리행과 자료 행의 칸 수가 같다', () => {
+test('시트 23개(10차 「입고_FIFO」·11차 「단가_비교」 더함) — 보고용 4개(총괄·원자재·반제품·제품)가 맨 앞, 백데이터 표 시트는 머리행과 자료 행의 칸 수가 같다', () => {
   const sheets = L.buildSheets(res, settings, false, { raw: { '원료': { memo: '메모', ai: '해설' } } });
   const names = Object.keys(sheets);
-  assert.equal(names.length, 22);
+  assert.equal(names.length, 23);
   assert.deepEqual(names.slice(0, 4), ['총괄', '원자재', '반제품', '제품']);
   assert.deepEqual(L.REPORT_SHEETS, ['총괄', '원자재', '반제품', '제품']);
   for (const [name, rows] of Object.entries(sheets)) {
-    if (L.REPORT_SHEETS.includes(name) || ['Aging_개월별', '기준', '대조_차이알람', '판매현황_파일', '입고_FIFO'].includes(name)) continue;
+    if (L.REPORT_SHEETS.includes(name) || ['Aging_개월별', '기준', '대조_차이알람', '판매현황_파일', '입고_FIFO', '단가_비교'].includes(name)) continue;
     rows.slice(1).forEach(r => assert.equal(r.length, rows[0].length, name));
   }
   assert.equal(sheets['원자재_품목별'].length, 1 + 4);
@@ -1030,7 +1030,7 @@ test('겹친 기간 중복 제거 — 두 파일에 같은 줄은 한 번, 한 �
   const b = { fileName: 'b', rows: [rrow('2026-06-10', '1', 'S', 1000), rrow('2026-06-10', '1', 'S', 1000), rrow('2026-07-01', '1', 'T', 7)], groups: [''], notes: [''] };
   const ri = L.receiptIndex([a, b], { asOf: AS });
   assert.deepEqual([ri.read, ri.kept, ri.overlap], [6, 4, 2]);
-  assert.deepEqual(ri.byCode.S, [['2026-06-10', 1000], ['2026-06-10', 1000]]);
+  assert.deepEqual(ri.byCode.S, [['2026-06-10', 1000, 100], ['2026-06-10', 1000, 100]]);
   // 수량이 다르면 다른 줄(겹침 아님)
   const c = { fileName: 'c', rows: [rrow('2026-06-10', '1', 'S', 999)], groups: [''], notes: [''] };
   assert.equal(L.receiptIndex([a, c]).kept, 4);
@@ -1044,7 +1044,7 @@ test('빈 달 찾기 — 첫 달 ~ (마지막 달·기준일 달 중 늦은 달)
 test('반품(음수)은 쌓지 않고 세기만, 적요 제외 규칙(「*」)', () => {
   const f = { fileName: 'x', rows: [rrow('2026-08-01', '1', 'A', 10), rrow('2026-08-02', '1', 'A', -3), [...rrow('2026-08-03', '1', 'A', 4)].map((v, i) => i === 8 ? 1 : v)], groups: [''], notes: ['', '예시수출(가상)'] };
   const ri = L.receiptIndex([f], { exclude: L.parseChinaCustomers('예시수출*') });
-  assert.deepEqual([ri.negative, ri.excluded, ri.byCode.A], [1, 1, [['2026-08-01', 10]]]);
+  assert.deepEqual([ri.negative, ri.excluded, ri.byCode.A], [1, 1, [['2026-08-01', 10, 100]]]);
 });
 test('구매현황 파일 읽기(가상 5개) — 19칸 머리행 짝, 전표 순번, 계·총합계·출력일 줄, 마감 전 파일', () => {
   const rb = Sample.receiptBooks();
@@ -1156,6 +1156,108 @@ test('설정 옮기기(10차) — 예전 「재고잔량분석 칸 먼저」는 
   const b = L.migrateSettings({ agingPath: 'out', chinaCustomers: '', longRawOp: 'gt' }, d);
   assert.deepEqual([b.settings.agingBasisRaw, b.settings.agingBasisSemi, b.round10], ['sale', 'sale', false]);
   assert.equal(L.migrateSettings({ agingBasisRaw: 'receipt', agingPath: 'file' }, d).settings.agingBasisRaw, 'receipt');
+});
+
+console.log('단가 기준 — 선입선출 역산 · 이동평균법 (11차)');
+// 입고 목록은 receiptIndex().byCode 처럼 최근 순 [입고일, 수량, 단가]
+const RX = [['2026-08-20', 100, 16], ['2026-08-01', 100, 10]];
+test('이동평균: 100개@10 → 50개 출고 → 100개@16 = (50×10 + 100×16) ÷ 150 = 14', () => {
+  const m = L.movingAverage({ receipts: RX, issues: [['2026-08-10', 50]], asOf: '2026-08-31' });
+  assert.deepEqual([m.avg, m.qty, m.start, m.startDate, m.receipts, m.clamped], [14, 150, 'history', '2026-08-01', 2, 0]);
+  // 출고가 없으면 (100×10 + 100×16) ÷ 200 = 13
+  assert.equal(L.movingAverage({ receipts: RX, asOf: '2026-08-31' }).avg, 13);
+  // 기준일(8/15) 뒤 입고는 보지 않음 → 10
+  assert.equal(L.movingAverage({ receipts: RX, issues: [['2026-08-10', 50]], asOf: '2026-08-15' }).avg, 10);
+});
+test('선입선출 역산: 현재고 120 = 최근 100개×16 + 그 앞 20개×10 = 1,800 (단가 15)', () => {
+  const f = L.fifoCover(120, RX, new Date(2026, 7, 31));
+  assert.deepEqual(f.layers.map(x => [x.qty, x.price]), [[100, 16], [20, 10]]);
+  const v = L.fifoValue(f, 999);
+  assert.deepEqual([v.amount, v.unit, v.fallbackQty], [1800, 15, 0]);
+  // 이력으로 다 못 덮은 30개는 파일 단가(12)로: 100×16 + 100×10 + 30×12 = 2,960
+  const v2 = L.fifoValue(L.fifoCover(230, RX, new Date(2026, 7, 31)), 12);
+  assert.deepEqual([v2.amount, v2.fallbackQty, v2.uncovered], [2960, 30, 30]);
+  assert.equal(L.fifoValue(L.fifoCover(230, RX, new Date(2026, 7, 31)), null).amount, null);   // 파일 단가도 없으면 못 셈
+});
+test('이동평균: 전월 재고(50개·600원 → 12)에서 시작, 전월 기준일 이전 입고는 보지 않음 → (600 + 150×16) ÷ 200 = 15', () => {
+  const m = L.movingAverage({ receipts: [['2026-08-10', 150, 16], ['2026-07-20', 999, 1]], opening: { date: '2026-07-31', qty: 50, amount: 600 }, asOf: '2026-08-31' });
+  assert.deepEqual([m.avg, m.qty, m.start, m.startDate, m.receipts], [15, 200, 'prev', '2026-07-31', 1]);
+  // 입고가 없으면 전월 평균 그대로
+  assert.equal(L.movingAverage({ receipts: [], opening: { date: '2026-07-31', qty: 50, amount: 600 }, asOf: '2026-08-31' }).avg, 12);
+});
+test('이동평균: 출고가 재고보다 많으면 0 으로 맞추고 알림 — 10@5, 30 출고(20 모자람), 10@7 → 7', () => {
+  const m = L.movingAverage({ receipts: [['2026-08-09', 10, 7], ['2026-08-01', 10, 5]], issues: [['2026-08-05', 30]], asOf: '2026-08-31' });
+  assert.deepEqual([m.avg, m.qty, m.clamped, m.clampedQty], [7, 10, 1, 20]);
+});
+test('이동평균: 같은 날은 입고 먼저 — 100@10 입고·100 출고(8/1), 100@20(8/2) → 20', () => {
+  const m = L.movingAverage({ receipts: [['2026-08-02', 100, 20], ['2026-08-01', 100, 10]], issues: [['2026-08-01', 100]], asOf: '2026-08-31' });
+  assert.deepEqual([m.avg, m.qty, m.clamped], [20, 100, 0]);
+});
+test('단가 빈(0) 입고는 평균을 바꾸지 않음 — 수량만 더하고 셈, 평균이 없을 때는 수량도 넣지 않음', () => {
+  const a = L.movingAverage({ receipts: [['2026-08-02', 100, null], ['2026-08-01', 100, 10]], asOf: '2026-08-31' });
+  assert.deepEqual([a.avg, a.qty, a.noPrice], [10, 200, 1]);
+  const b = L.movingAverage({ receipts: [['2026-08-02', 50, 12], ['2026-08-01', 100, 0]], asOf: '2026-08-31' });
+  assert.deepEqual([b.avg, b.qty, b.noPrice], [12, 50, 1]);
+  // 선입선출 역산: 단가 빈 층은 파일 단가로 — 50×12 + 70×(파일 11) = 1,370
+  const v = L.fifoValue(L.fifoCover(120, [['2026-08-02', 50, 12], ['2026-08-01', 100, 0]], new Date(2026, 7, 31)), 11);
+  assert.deepEqual([v.amount, v.noPriceQty], [1370, 70]);
+});
+test('분석 — 단가 기준 「이동평균」·「선입선출 역산」: 당월 금액·출처, 못 세는 품목은 현행 금액, 적요 제외 입고는 계속 빠짐', () => {
+  // A: 전월 50개·500원(평균 10) → 8/5 100개@16 → 8/10 30개 출고 → 당월 120개(파일 1,200원)
+  //    이동평균 = (500 + 1,600) ÷ 150 = 14 → 120 × 14 = 1,680
+  //    선입선출 역산 = 100×16 + 20×(파일 단가 10) = 1,800
+  // B: 구매 입고 없음 → 두 방법 모두 못 셈(파일 70원)
+  const d = {
+    rawCur: [{ code: 'A', group: 'HSG', qty: 120, amount: 1200 }, { code: 'B', group: 'HSG', qty: 10, amount: 70 }],
+    rawPrev: [{ code: 'A', group: 'HSG', qty: 50, amount: 500 }, { code: 'B', group: 'HSG', qty: 10, amount: 70 }],
+    outbound: [{ code: 'A', date: '2026-08-10', qty: 30 }],
+    receipts: [{ fileName: 'x', rows: [rrow('2026-08-05', '1', 'A', 100, 16), [...rrow('2026-08-20', '1', 'A', 20, 100).slice(0, 8), 1]], groups: [''], notes: ['', '예시수출(가상)'] }]
+  };
+  const base = { ...L.defaultSettings(), curDate: '2026-08-31', prevDate: '2026-07-31', receiptExclude: '예시수출*' };
+  const r0 = L.analyze(d, base);   // 처음 값 = 현행
+  const a0 = r0.raw.items.find(i => i.code === 'A');
+  assert.deepEqual([a0.curAmt, a0.curAmtSource, a0.pc.mavgUnit, a0.pc.mavgAmt, a0.pc.fifoAmt, a0.pc.fifoFallbackQty, a0.pc.mavgStart], [1200, '파일 금액', 14, 1680, 1800, 20, 'prev']);
+  assert.deepEqual(r0.raw.priceCompare.total, { group: '합계', items: 2, qty: 130, file: 1270, fifo: 1870, mavg: 1750, fifoMissing: 1, mavgMissing: 1, fifoFallback: 1, fifoDiff: 600, mavgDiff: 480, mavgVsFifo: -120 });
+  const rm = L.analyze(d, { ...base, amountBasis: 'mavg' });
+  const am = rm.raw.items.find(i => i.code === 'A'), bm = rm.raw.items.find(i => i.code === 'B');
+  assert.deepEqual([am.curAmt, am.curAmtSource, am.diffAmt], [1680, '이동평균', 1180]);
+  assert.deepEqual([bm.curAmt, bm.curAmtSource], [70, '파일 금액 — 이동평균 계산 못 함']);
+  assert.equal(rm.raw.groups.total.curAmt, 1750);
+  const rf = L.analyze(d, { ...base, amountBasis: 'fifo' });
+  assert.deepEqual([rf.raw.items[0].curAmt, rf.raw.items[0].curAmtSource, rf.raw.groups.total.curAmt], [1800, '선입선출 역산(일부 파일 단가)', 1870]);
+  // 적요 제외를 지우면 8/20 20개@100 이 들어가 평균이 (120×14 + 2,000) ÷ 140 = 26.2857
+  assert.equal(L.analyze(d, { ...base, receiptExclude: '' }).raw.items[0].pc.mavgUnit, 26.2857);
+  // 구매현황이 없으면 비교표 없음, 기준을 바꿔도 현행 금액 + 까닭
+  const rn = L.analyze({ ...d, receipts: [] }, { ...base, amountBasis: 'mavg' });
+  assert.deepEqual([rn.raw.priceCompare, rn.raw.items[0].curAmt, rn.raw.items[0].curAmtSource], [null, 1200, '파일 금액 — 이동평균 계산 못 함(구매현황 없음)']);
+  // 엑셀 「단가_비교」 시트
+  const sh = L.buildSheets(r0, base, false, {})['단가_비교'];
+  const hd = sh.find(x => x[0] === '구분' && x[1] === '품번');
+  const rowA = sh.find(x => x[1] === 'A');
+  assert.deepEqual([rowA[hd.indexOf('이동평균 금액')], rowA[hd.indexOf('선입선출 역산 금액')], rowA[hd.indexOf('차이(이동평균 − 파일)')]], [1680, 1800, 480]);
+  assert.ok(sh.some(x => x[0] === '합계' && x[1] === '원자재' && x[6] === 1750));
+  assert.equal(L.checkSettings({ ...base, amountBasis: '엉뚱' }).amountBasis, 'file');
+});
+test('이동평균 — 전월 재고 파일이 없으면 입고 이력 시작부터, 판매현황은 그 달 말일 출고로', () => {
+  // 7/1 100@10, 7월 판매 60(7/31 로 봄), 8/1 100@16 → (40×10 + 100×16) ÷ 140 = 14.2857
+  const d = { rawCur: [{ code: 'A', group: 'HSG', qty: 140, amount: 1400 }],
+    sales: [{ fileName: 's', byCode: { A: { '2026-07': [60, '2026-07-15'] } } }],
+    receipts: [{ fileName: 'x', rows: [rrow('2026-07-01', '1', 'A', 100, 10), rrow('2026-08-01', '1', 'A', 100, 16)], groups: [''], notes: [''] }] };
+  const set = { ...L.defaultSettings(), curDate: '2026-08-31', salesScope: 'all' };
+  const pc = L.analyze(d, set).raw.items[0].pc;
+  assert.deepEqual([pc.mavgUnit, pc.mavgStart, pc.mavgStartLabel], [14.2857, 'history', '입고 이력 시작부터(2026-07-01)']);
+  // 원자재에 판매현황을 쓰지 않으면(처음 값) 출고 없음 → 13
+  assert.equal(L.analyze(d, { ...set, salesScope: 'prod' }).raw.items[0].pc.mavgUnit, 13);
+});
+test('예시 데이터 — 구매현황 5개로 원자재 단가 비교표가 만들어짐(W-4001 이동평균 102.623)', () => {
+  const rb = Sample.receiptBooks();
+  const receipts = Object.entries(rb).map(([fn, b]) => L.scanReceipts(b['구매현황내역'], { fileName: fn }));
+  const r = L.analyze({ ...sampleOut(), receipts }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV });
+  const t = r.raw.priceCompare.total;
+  assert.deepEqual([t.items, t.file], [13, r.raw.groups.total.curAmt]);
+  assert.ok(t.fifoDiff !== 0 && t.mavgDiff !== 0);
+  // W-4001: 전월 30,000개 × 95 → 8/1 22,000개@110 → 8/22 9,000개@110 (출고 자료 없음) = (2,850,000 + 3,410,000) ÷ 61,000 = 102.623
+  assert.equal(r.raw.items.find(i => i.code === 'W-4001').pc.mavgUnit, 102.623);
 });
 
 console.log(process.exitCode ? '\n실패 있음' : '\n전부 통과 (' + passed + '개)');

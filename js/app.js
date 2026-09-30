@@ -813,6 +813,12 @@
           h('select', { name: 'amountSource' },
             h('option', { value: 'file', selected: settings.amountSource !== 'price' }, '재고 파일의 금액 우선 (없으면 파일 단가 × 수량, 그다음 단가표)'),
             h('option', { value: 'price', selected: settings.amountSource === 'price' }, '단가표 × 수량 우선 (단가 없으면 파일 금액)'))),
+        h('label', { class: 'field', 'data-field': 'amountBasis' }, h('span', null, '단가 기준 (당월 재고금액)'),
+          h('select', { name: 'amountBasis' },
+            h('option', { value: 'file', selected: settings.amountBasis !== 'fifo' && settings.amountBasis !== 'mavg' }, '현행 — 위 「재고금액 산출」 그대로 (처음 값)'),
+            h('option', { value: 'fifo', selected: settings.amountBasis === 'fifo' }, '선입선출 역산 — 현재고를 최근 입고부터 덮은 입고 단가로'),
+            h('option', { value: 'mavg', selected: settings.amountBasis === 'mavg' }, '이동평균법 — 입고마다 평균 단가를 다시 냄')),
+          h('small', { class: 'note' }, '선입선출 역산·이동평균법은 「구매현황(입고)」의 단가로 계산합니다. 계산할 입고가 없는 품목(생산으로 들어오는 반제품·제품 등)은 현행 금액을 쓰고 품목의 금액 출처에 적습니다. 전월 금액은 언제나 현행입니다. 세 방법을 나란히 본 표는 분석 화면의 「단가 기준 비교」와 엑셀 「단가_비교」 시트에 있습니다.')),
         num('topN', '금액 증가 상위 몇 건을 관리대상으로', '0 이면 적용 안 함'),
         num('turnoverMax', '저회전 기준 — 회전율이 이 값 미만', '비우면 적용 안 함. 회전율 = 당월 출고수량 ÷ 평균재고(전월·당월 평균)'),
         num('causeTopN', '증감 원인 — 대분류마다 기여 상위 몇 품목', '예: 5')),
@@ -931,6 +937,8 @@
     }
     wrap.appendChild(h('p', { class: 'note' }, plantText() + ' · 기준일 ' + res.curDate + ' (전월 ' + res.prevDate + ') · Aging 은 개월 단위 · 장기재고 ' + k.longText));
     wrap.appendChild(h('p', { class: 'basis-line', 'data-basis-line': k.basis }, h('strong', null, kindText + ' Aging 기준: '), k.basisUsed, ' ', h('a', { href: '#/settings' }, '(기준 설정에서 바꾸기)')));
+    if (k.amountBasis && k.amountBasis !== 'file') wrap.appendChild(h('p', { class: 'basis-line', 'data-amount-basis': k.amountBasis }, h('strong', null, '당월 금액 단가 기준: '), L.AMOUNT_BASIS_LABEL[k.amountBasis],
+      res.hasHistory.receipts ? ' — 계산할 입고가 없는 품목은 현행 금액(아래 「단가 기준 비교」 표의 「당월 금액에 쓴 값」)' : ' — 구매현황을 올리지 않아 모든 품목이 현행 금액입니다', ' ', h('a', { href: '#/settings' }, '(기준 설정에서 바꾸기)')));
     append(wrap, missingNotes(res, kindKey));
 
     var t = k.groups.total;
@@ -995,11 +1003,45 @@
     var cmp = compareTable(k, res);
     if (cmp) { wrap.appendChild(h('h3', null, 'Aging 기준 비교 — 경로에 따라 분포가 어떻게 달라지는지')); wrap.appendChild(cmp); }
     append(wrap, fifoSection(k, res, kindText, codeLabel));
+    append(wrap, priceCompareSection(k, res, kindText, codeLabel, groupLabel));
 
     // 품목별
     wrap.appendChild(h('h2', null, '품목별 증감 · Aging'));
     wrap.appendChild(itemTable(kindKey, k.items, codeLabel, groupLabel));
     return wrap;
+  }
+
+  // 단가 기준 비교(11차) — 현행(파일 금액) · 선입선출 역산 · 이동평균법. 구매현황을 올렸을 때만 계산합니다.
+  function priceCompareSection(k, res, kindText, codeLabel, groupLabel) {
+    var box = h('details', { class: 'fifo-box', 'data-price-compare': k.kind, open: k.amountBasis && k.amountBasis !== 'file' ? true : null });
+    var pcs = k.priceCompare;
+    box.appendChild(h('summary', null, '단가 기준 비교 — 현행 · 선입선출 역산 · 이동평균법' + (pcs && pcs.total.items ? ' (이동평균 − 현행 ' + fmtSigned(pcs.total.mavgDiff) + ')' : '')));
+    box.appendChild(h('div', { class: 'alert info' }, L.PRICE_METHOD_NOTES.map(function (x) { return h('p', null, h('strong', null, x[0] + ': '), x[1]); })));
+    if (!pcs) { box.appendChild(h('p', { class: 'note' }, '「자료 → 구매현황(입고) 여러 파일」을 올리면 입고 단가로 두 방법을 계산해 보입니다.')); return box; }
+    box.appendChild(h('p', { class: 'note' }, '이동평균의 출고는 출고 이력(날짜별)과 판매현황(달마다 합계라 그 달 말일에 나간 것으로 봄)을 씁니다. 전월 재고가 있으면 전월 금액 ÷ 전월 수량에서 시작하고, 없으면 입고 이력의 첫 입고부터 셉니다. 계산하지 못한 품목은 합계에서 현행 금액으로 셉니다.'));
+    if (!settings.plantView) {
+      var prow = res.plants.rows.filter(function (r) { return r.has; }).map(function (r) { return { label: r.label, t: r.detail[k.kind].priceCompare }; }).concat([{ label: '합계', t: pcs, total: true }]);
+      box.appendChild(h('h3', null, '공장별'));
+      box.appendChild(table(['공장', n('품목 수'), n('현행(파일) 금액'), n('선입선출 역산'), n('이동평균'), n('선입선출 − 현행'), n('이동평균 − 현행'), n('이동평균 − 선입선출')], prow.filter(function (x) { return x.t; }).map(function (x) {
+        var t = x.t.total;
+        return h('tr', { class: x.total ? 'total' : null }, td(x.label), td(fmt(t.items), 'num'), td(fmt(t.file), 'num'), td(fmt(t.fifo), 'num'), td(fmt(t.mavg), 'num'),
+          td(fmtSigned(t.fifoDiff), 'num ' + sign(t.fifoDiff)), td(fmtSigned(t.mavgDiff), 'num ' + sign(t.mavgDiff)), td(fmtSigned(t.mavgVsFifo), 'num ' + sign(t.mavgVsFifo)));
+      })));
+    }
+    box.appendChild(h('h3', null, groupLabel + '별'));
+    box.appendChild(table([groupLabel, n('품목 수'), n('당월 수량'), n('현행(파일) 금액'), n('선입선출 역산'), n('이동평균'), n('선입선출 − 현행'), n('이동평균 − 현행'), n('못 셈(선입선출·이동평균)')], pcs.rows.concat([pcs.total]).map(function (g) {
+      return h('tr', { class: g === pcs.total ? 'total' : null }, td(g.group), td(fmt(g.items), 'num'), td(fmt(g.qty), 'num'), td(fmt(g.file), 'num'), td(fmt(g.fifo), 'num'), td(fmt(g.mavg), 'num'),
+        td(fmtSigned(g.fifoDiff), 'num ' + sign(g.fifoDiff)), td(fmtSigned(g.mavgDiff), 'num ' + sign(g.mavgDiff)), td(fmt(g.fifoMissing) + ' · ' + fmt(g.mavgMissing), 'num'));
+    })));
+    var list = k.items.filter(function (it) { return it.curQty > 0 && it.pc; })
+      .sort(function (a, b) { return Math.abs(b.pc.mavgDiff || 0) + Math.abs(b.pc.fifoDiff || 0) - Math.abs(a.pc.mavgDiff || 0) - Math.abs(a.pc.fifoDiff || 0) || (a.code < b.code ? -1 : 1); });
+    box.appendChild(h('h3', null, '품목별 (차이 큰 순' + (list.length > MAX_ROWS ? ', 앞 ' + MAX_ROWS + '건 — 전체는 엑셀 「단가_비교」' : '') + ')'));
+    box.appendChild(table([codeLabel, '품명', groupLabel, n('당월 수량'), n('현행 단가'), n('현행 금액'), n('선입선출 단가'), n('선입선출 금액'), n('이동평균 단가'), n('이동평균 금액'), '이동평균 시작', n('이동평균 − 현행'), '당월 금액에 쓴 값', '비고'], list.slice(0, MAX_ROWS).map(function (it) {
+      var pc = it.pc;
+      return h('tr', null, td(it.code, 'nowrap'), td(it.name), td(it.group), td(fmt(it.curQty), 'num'), td(fmt(pc.fileUnit), 'num'), td(fmt(pc.fileAmt), 'num'), td(fmt(pc.fifoUnit), 'num'), td(fmt(pc.fifoAmt), 'num'),
+        td(fmt(pc.mavgUnit), 'num'), td(fmt(pc.mavgAmt), 'num'), td(pc.mavgStartLabel), td(fmtSigned(pc.mavgDiff), 'num ' + sign(pc.mavgDiff)), td(it.curAmtSource), td(pc.note));
+    }), { empty: '당월 재고가 있는 품목이 없습니다.' }));
+    return box;
   }
 
   // 입고 FIFO(10차) — 층별 분포 + 회사 재고잔량분석 칸과 품목별 비교(검증). 구매현황을 올렸을 때만.

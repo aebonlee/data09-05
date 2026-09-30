@@ -10,6 +10,7 @@
 --               예전 판을 이미 실행한 프로젝트에 다시 실행하면 1-B 절이 칸을 더하고 일 단위 설정을 개월로 바꿉니다.
 --  2026-09-30 저녁(10차) : 구매현황(입고) 표 2개(receipt_file·receipt_line), Aging 기준을 구분마다(aging_basis_raw/semi/prod),
 --               구매현황 제외 적요(receipt_exclude) — 1-D 절. aging_path 칸은 예전 판 호환으로 남겨 둡니다(앱은 쓰지 않음).
+--  2026-09-30 (11차) : 단가 기준(amount_basis — file 현행 / fifo 선입선출 역산 / mavg 이동평균법) 칸 — 1-E 절.
 --  2026-09-29 저녁(3차) : 원자재 장기재고 「초과」/반제품·제품 「이상」 방식 칸, 분포 최대 처음 값 36, Aging 경로·판매현황 적용 대상,
 --               반제품 자리(semiCur·semiPrev)·보고서 자리(report), 판매현황 표 2개, 보고서 대조 표 2개(1-C 절).
 --
@@ -79,6 +80,8 @@ create table if not exists public.app_settings (
                  check (no_out_policy in ('inbound', 'none')),
   amount_source  text not null default 'file'
                  check (amount_source in ('price', 'file')),
+  amount_basis   text not null default 'file'         -- 단가 기준(11차): file = 현행 / fifo = 선입선출 역산 / mavg = 이동평균법
+                 check (amount_basis in ('file', 'fifo', 'mavg')),
   top_n          int not null default 10 check (top_n >= 0),
   turnover_max   numeric check (turnover_max is null or turnover_max >= 0),
   cause_top_n    int not null default 5,             -- 증감 원인: 대분류마다 기여 상위 몇 품목
@@ -507,6 +510,15 @@ alter table public.stock_item     drop constraint if exists stock_item_plant_che
 alter table public.stock_item     add  constraint stock_item_plant_check     check (plant <> '중국' and (aging_file is null or aging_file >= 0));
 alter table public.stock_movement drop constraint if exists stock_movement_plant_check;
 alter table public.stock_movement add  constraint stock_movement_plant_check check (plant <> '중국');
+
+-- ----------------------------------------------------------------------------
+-- 1-E. 2026-09-30 (11차) — 단가 기준(이동평균법 추가)
+--  당월 재고금액을 file(현행 — 처음 값) / fifo(선입선출 역산) / mavg(이동평균법) 중 무엇으로 셀지.
+--  예전 판을 실행한 프로젝트는 칸이 더해지고 처음 값 file 이 들어갑니다(지금까지와 같은 계산).
+-- ----------------------------------------------------------------------------
+alter table public.app_settings add column if not exists amount_basis text not null default 'file';
+alter table public.app_settings drop constraint if exists app_settings_amount_basis_check;
+alter table public.app_settings add constraint app_settings_amount_basis_check check (amount_basis in ('file', 'fifo', 'mavg'));
 
 -- ----------------------------------------------------------------------------
 -- 2. 함수 · 트리거

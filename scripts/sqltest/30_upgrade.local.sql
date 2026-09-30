@@ -55,6 +55,8 @@ begin
   if r.aging_basis_raw <> 'sale' or r.aging_basis_semi <> 'sale' or r.aging_basis_prod <> 'sale' or r.receipt_exclude <> '' then
     raise exception 'FAIL  10차 칸(aging_basis_*·receipt_exclude) 처음 값이 아니다 (실제 % / % / %)', r.aging_basis_raw, r.aging_basis_semi, r.aging_basis_prod;
   end if;
+  if r.amount_basis <> 'file' then raise exception 'FAIL  11차 단가 기준 칸(amount_basis)이 처음 값 file 로 더해지지 않았다 (실제 %)', r.amount_basis; end if;
+  raise notice '  OK   예전 설정 행에 단가 기준 칸(현행 file)이 더해진다';
   if (select aging_basis_raw || aging_basis_semi || aging_basis_prod from public.app_settings where owner_id = 'aaaaaaaa-0000-0000-0000-000000000002') <> 'filefilefile' then
     raise exception 'FAIL  예전 aging_path = file 행이 세 구분 모두 file 로 옮겨지지 않았다';
   end if;

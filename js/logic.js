@@ -221,6 +221,12 @@
       overMonths: 6,
       noOutPolicy: 'inbound', // 출고 이력 없는 품목: inbound=입고일로 대신, none=판정 보류
       amountSource: 'file',   // file=재고 파일 금액 우선(없으면 단가표), price=단가표 우선 — 실데이터 재고 파일에 금액 칸이 있어 file 이 기본
+      // 단가 기준(11차, 2026-09-30 「이동평균법 계산도 할 수 있게」): 당월 재고금액을 무엇으로 셀지.
+      //  file = 현행(위 amountSource 대로 재고 파일 금액·단가표 — 처음 값, 지금까지와 같음)
+      //  fifo = 선입선출 역산(구매현황으로 현재고를 최근 입고부터 덮은 층마다 그 입고 단가)
+      //  mavg = 이동평균법(전월 재고 금액에서 시작해 입고마다 평균 단가를 다시 냄)
+      // 구매현황이 없거나 품목에 계산할 입고가 없으면 그 품목은 현행 금액을 쓰고 출처에 적습니다. 전월 금액은 언제나 현행(전월 확정 값).
+      amountBasis: 'file',
       topN: 10,             // 금액 증가 상위 N건
       turnoverMax: '',      // 회전율이 이 값 미만이면 저회전(비우면 적용 안 함)
       causeTopN: 5,         // 증감 원인 — 대분류마다 기여 상위 몇 품목을 보일지
@@ -878,7 +884,8 @@
       groupMap: gm, groupOthers: s.groupOthers === 'keep' ? 'keep' : 'other',
       plantView: isPlant(pv) ? pv : '',
       noOutPolicy: s.noOutPolicy === 'none' ? 'none' : 'inbound',
-      amountSource: s.amountSource === 'file' ? 'file' : 'price'
+      amountSource: s.amountSource === 'file' ? 'file' : 'price',
+      amountBasis: s.amountBasis === 'fifo' || s.amountBasis === 'mavg' ? s.amountBasis : 'file'
     };
   }
 
@@ -920,6 +927,47 @@
       var agingFileOpen = !!(c && c.agingFileOpen);
       // 입고 FIFO(10차): 구매현황을 올렸으면 당월 재고가 있는 품목마다 최근 입고부터 거꾸로 쌓아 현재고를 덮습니다
       var fifo = ctx.receipts && c && c.qty > 0 ? fifoCover(c.qty, ctx.receipts.byCode[code], ctx.cur) : null;
+      // 단가 기준 비교(11차): 구매현황이 있으면 당월 재고 품목마다 선입선출 역산·이동평균 금액을 따로 계산합니다
+      var pc = null;
+      if (fifo) {
+        var fileAmt = curAmt.value, fileUnit = fileAmt != null ? fileAmt / curQty : null;
+        var fv = fifoValue(fifo, fileUnit);
+        var issues = (ctx.issueOut[code] || []).concat(useSales ? salesIssuesOf(code, ctx.salesFiles, salesMode === 'china' ? ctx.chinaCusts : null) : []);
+        var opening = null, openNote = '';
+        if (prevRecs && prevRecs.length) {
+          if (prevQty > 0 && prevAmt.value == null) openNote = '전월 금액이 없어 입고 이력 시작부터';
+          else opening = { date: ctx.prev, qty: prevQty, amount: prevQty > 0 ? prevAmt.value : 0 };
+        }
+        var rlist = ctx.receipts.byCode[code] || [], curStr = toDateStr(ctx.cur);
+        // 구매현황에 기준일까지 단가 있는 입고가 한 번도 없는 품목(생산으로 들어오는 반제품·제품 대부분)은 이동평균 대상이 아닙니다 —
+        // 전월 단가가 그대로 이어지는 것처럼 보이지 않게 계산하지 않고 현행 금액을 씁니다.
+        var hasBuy = rlist.some(function (x) { return x[0] <= curStr && x[1] > 0 && goodPrice(x[2]); });
+        var ma = hasBuy ? movingAverage({ receipts: rlist, issues: issues, opening: opening, asOf: ctx.cur }) : { avg: null, qty: null, start: 'none', startDate: '', receipts: 0, noPrice: 0, clamped: 0, clampedQty: 0 };
+        pc = {
+          fileAmt: fileAmt, fileUnit: fileUnit == null ? null : round(fileUnit, 4), fileSource: curAmt.source,
+          fifoAmt: fv.amount, fifoUnit: fv.unit, fifoFallbackQty: fv.fallbackQty, fifoNoPriceQty: fv.noPriceQty, fifoUncovered: fv.uncovered,
+          mavgUnit: ma.avg, mavgAmt: ma.avg == null ? null : round(curQty * ma.avg, 2), mavgStart: ma.start, mavgStartDate: ma.startDate,
+          mavgStartLabel: ma.start === 'prev' ? '전월 재고(' + ma.startDate + ')부터' : ma.start === 'history' ? '입고 이력 시작부터(' + ma.startDate + ')' + (openNote ? ' — ' + openNote : '') : '',
+          mavgQty: ma.qty, mavgReceipts: ma.receipts, mavgNoPrice: ma.noPrice, mavgClamped: ma.clamped, mavgClampedQty: ma.clampedQty, issueCount: issues.length
+        };
+        var notes = [];
+        if (fv.amount == null && hasBuy) notes.push(fv.receiptQty > 0 ? '선입선출: 파일 단가가 없어 못 셈' : '선입선출: 현재고를 덮은 입고에 단가 없음');
+        else if (fv.fallbackQty > 0) notes.push('선입선출: ' + fv.fallbackQty + '개는 파일 단가(' + (fv.uncovered > 0 ? '입고 이력으로 못 덮음' : '') + (fv.uncovered > 0 && fv.noPriceQty > 0 ? '·' : '') + (fv.noPriceQty > 0 ? '입고 단가 빈칸' : '') + ')');
+        if (!hasBuy) notes.push('구매현황에 단가 있는 입고 없음 — 이동평균 계산 대상 아님');
+        else if (ma.avg == null) notes.push('이동평균: 시작 단가를 정할 입고 없음');
+        if (ma.noPrice) notes.push('단가 빈 입고 ' + ma.noPrice + '줄은 평균에서 뺌');
+        if (ma.clamped) notes.push('출고가 재고보다 많아 0으로 맞춘 곳 ' + ma.clamped + '번(' + ma.clampedQty + '개)');
+        pc.note = notes.join(' · ');
+        pc.fifoDiff = pc.fifoAmt == null || fileAmt == null ? null : round(pc.fifoAmt - fileAmt, 2);
+        pc.mavgDiff = pc.mavgAmt == null || fileAmt == null ? null : round(pc.mavgAmt - fileAmt, 2);
+        pc.mavgVsFifo = pc.mavgAmt == null || pc.fifoAmt == null ? null : round(pc.mavgAmt - pc.fifoAmt, 2);
+      }
+      // 단가 기준(설정)이 현행이 아니면 셀 수 있는 품목의 당월 금액을 바꿉니다. 못 세면 현행 금액 + 출처에 까닭
+      if (ctx.amountBasis !== 'file' && c && curQty > 0) {
+        var byBasis = !pc ? null : ctx.amountBasis === 'fifo' ? pc.fifoAmt : pc.mavgAmt;
+        if (byBasis != null) curAmt = { value: byBasis, source: ctx.amountBasis === 'fifo' ? (pc.fifoFallbackQty > 0 ? '선입선출 역산(일부 파일 단가)' : '선입선출 역산') : '이동평균' };
+        else curAmt = { value: curAmt.value, source: curAmt.source + ' — ' + (ctx.amountBasis === 'fifo' ? '선입선출 역산' : '이동평균') + ' 계산 못 함' + (ctx.receipts ? '' : '(구매현황 없음)') };
+      }
       // 표시 기준(설정 — 구분마다 agingBasis{Raw,Semi,Prod}, 10차)
       //  receipt: 입고 FIFO → (구매현황이 없으면) 최근 출고일 → 재고잔량분석 칸
       //  sale   : 최근 출고일(판매현황·출고 이력, 원자재는 중국공장 판매) → 재고잔량분석 칸
@@ -975,6 +1023,7 @@
         agingInDays: agingInDays, agingOutDays: agingOutDays, agingFile: agingFile, agingFileOpen: agingFileOpen, agingFileText: c ? c.agingFileText : '',
         agingShown: sh.m, agingShownOpen: sh.open, agingShownDays: sh.d, agingBasis: sh.basis,
         bucket: bucketFor(sh),
+        pc: pc,
         fifo: fifo, fifoMonths: fifo ? (fifo.uncovered > 0 ? null : fifo.months) : null,
         fitness: curQty > 0 ? fitnessOf(sh.m, longM, ctx.overMonths, longOp) : '재고 없음',
         // 다른 경로로 계산했을 때(기준 비교용)
@@ -1006,6 +1055,7 @@
       fifoBuckets: ctx.receipts ? fifoLayerSummary(items, ctx.agingMax, longM, longOp, ctx.noHistLabel, ctx.noHistMonths) : null,
       fifoStats: ctx.receipts ? fifoStatsOf(items) : null,
       agree: agreementSummary(items),
+      priceCompare: ctx.receipts ? priceCompareSummary(items, order) : null, amountBasis: ctx.amountBasis,
       // 입고 FIFO ↔ 재고잔량분석 칸(회사 계산) — 표시 기준과 상관없이 구매현황을 올렸으면 늘 맞대 봅니다(검증용)
       fifoVsFile: ctx.receipts ? agreementSummary(items.map(function (it) {
         return { code: it.code, name: it.name, group: it.group, curQty: it.curQty, curAmt: it.curAmt, agingFileText: it.agingFileText,
@@ -1294,7 +1344,7 @@
       if (prevMiss) months.push('전월');
       if (!months.length) return;
       var note = [];
-      if (curMiss) note.push(it.curAmtSource === '파일 금액' ? '당월은 파일 금액 사용' : '당월 금액 없음');
+      if (curMiss) note.push(/^파일 금액/.test(it.curAmtSource) ? '당월은 파일 금액 사용' : '당월 금액 없음');
       if (prevMiss) note.push(it.prevAmtSource === '파일 금액' ? '전월은 파일 금액 사용' : '전월 금액 없음');
       out.push({ kind: kindLabel, code: it.code, name: it.name, group: it.group, months: months.join('·'), curQty: it.curQty, prevQty: it.prevQty, note: note.join(', ') });
     });
@@ -1639,7 +1689,10 @@
       inQty: sumQtyByCode(inbound, s.prev, s.cur), outQty: sumQtyByCode(data.outbound, s.prev, s.cur),
       inQtyPrev: sumQtyByCode(inbound, prevPrev, s.prev), outQtyPrev: sumQtyByCode(data.outbound, prevPrev, s.prev),
       hasSales: sales.fileCount > 0, lastSales: sales.last, salesQty: sales.qty, salesQtyPrev: sales.qtyPrev,
-      china: sales.china || null
+      china: sales.china || null,
+      // 11차 단가 기준: 출고(이동평균의 재고 감소) = 출고 이력(날짜별) + 판매현황(달별 합 → 그 달 말일)
+      amountBasis: s.amountBasis || 'file', issueOut: issueMap(data.outbound), salesFiles: data.sales || [],
+      chinaCusts: chinaOn ? (data.sales || []).map(function (f) { return Object.keys(f.byCust || {}).filter(function (cu) { return matchCustomer(s.chinaRules, cu); }); }) : null
     };
     ctx.kind = 'raw';
     var raw = analyzeKind(data.rawCur, data.rawPrev, ctx);
@@ -1652,7 +1705,7 @@
     return {
       ok: true, errors: [],
       curDate: toDateStr(s.cur), prevDate: toDateStr(s.prev), agingMax: s.agingMax, longRaw: s.longRaw, longProd: s.longProd,
-      longRawOp: s.longRawOp, longProdOp: s.longProdOp, basis: s.basis,
+      longRawOp: s.longRawOp, longProdOp: s.longProdOp, basis: s.basis, amountBasis: ctx.amountBasis,
       hasHistory: { inbound: ctx.hasInbound, outbound: ctx.hasOutbound, sales: ctx.hasSales, price: !!prices.length, receipts: !!receipts },
       receipts: receiptSummary(receipts), noHistLabel: ctx.noHistLabel,
       sales: { fileCount: sales.fileCount, codes: sales.codeCount, codesAsOf: Object.keys(sales.last).length, minDate: sales.minDate, maxDate: sales.maxDate,
@@ -2003,13 +2056,14 @@
         if (!minDate || r[0] < minDate) minDate = r[0];
         if (r[0] > maxDate) maxDate = r[0];
         if (!(r[3] > 0)) { if (r[3] < 0) negative++; continue; }   // 반품(음수)·0 은 쌓지 않음(개수만)
-        (byCode[r[2]] || (byCode[r[2]] = [])).push([r[0], r[3], r[1]]);
+        (byCode[r[2]] || (byCode[r[2]] = [])).push([r[0], r[3], r[1], r[4]]);
       }
     });
     Object.keys(byCode).forEach(function (c) {
       // 최근 순. 같은 날이면 전표 순번이 큰 것을 더 최근으로 봅니다
       byCode[c].sort(function (a, b) { return a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : (+b[2] || 0) - (+a[2] || 0); });
-      byCode[c] = byCode[c].map(function (x) { return [x[0], x[1]]; });
+      // [입고일, 수량, 단가(없으면 null)] — 단가는 11차 선입선출 역산·이동평균 금액에 씁니다
+      byCode[c] = byCode[c].map(function (x) { return [x[0], x[1], x[3] == null ? null : x[3]]; });
     });
     // 빈 달: 첫 달 ~ (마지막 달과 기준일 달 중 늦은 달) 사이에 입고 줄이 하나도 없는 달
     var gaps = [], monthList = [];
@@ -2031,7 +2085,7 @@
   }
   // 입고 FIFO 한 품목: 현재고 qty 를 최근 입고부터(기준일 이전만) 쌓아 덮습니다.
   // list: receiptIndex().byCode[품목] (최근 순). 돌려주는 값:
-  //   { layers: [{ date, qty, months }] (최근 순), covered, uncovered(이력으로 못 덮은 수량), oldest(덮는 데 쓴 가장 오래된 입고일), months(그 경과 개월) }
+  //   { layers: [{ date, qty, months, price }] (최근 순), covered, uncovered(이력으로 못 덮은 수량), oldest(덮는 데 쓴 가장 오래된 입고일), months(그 경과 개월) }
   function fifoCover(qty, list, asOf) {
     var out = { layers: [], covered: 0, uncovered: 0, oldest: '', months: null };
     if (!(qty > 0)) return out;
@@ -2043,13 +2097,142 @@
       var take = Math.min(left, q);
       left = round(left - take, 6);
       var m = monthsBetween(parseDate(d), asOf);
-      out.layers.push({ date: d, qty: round(take, 4), months: m });
+      out.layers.push({ date: d, qty: round(take, 4), months: m, price: list[i][2] == null ? null : list[i][2] });
       out.oldest = d; out.months = m;
     }
     out.covered = round(qty - left, 4);
     out.uncovered = round(left, 4);
     return out;
   }
+  // ── 단가 기준 비교 (11차, 2026-09-30 — 이동평균법) ──────────────────────────
+  // 회사는 지금 재고 단가를 「선입선출 역산」으로 매기고(현재고를 최근 입고부터 거꾸로 덮은 입고의 단가), 이동평균법으로 바꾸는 것을
+  // 추진 중이라는 요청에 따라, 두 방법을 품목마다 따로 계산해 회사 파일 금액과 나란히 봅니다.
+  function goodPrice(p) { return p != null && isFinite(p) && p > 0; }
+  // 선입선출 역산 금액: fifoCover() 층마다 「덮은 수량 × 그 입고의 단가」를 더합니다.
+  // 입고 이력으로 덮지 못한 수량과 단가가 빈(0) 입고 층은 fallbackUnit(그 품목의 파일 단가 = 현행 금액 ÷ 수량)으로 셈하고 수량을 따로 알립니다.
+  // 돌려주는 값: { amount, unit, receiptQty(입고 단가로 센 수량), fallbackQty(파일 단가로 센 수량), noPriceQty, uncovered } — 셀 수 없으면 amount = null
+  function fifoValue(fifo, fallbackUnit) {
+    if (!fifo || !fifo.layers) return null;
+    var amt = 0, rq = 0, np = 0, qty = 0;
+    fifo.layers.forEach(function (ly) {
+      qty += ly.qty;
+      if (goodPrice(ly.price)) { amt += ly.qty * ly.price; rq += ly.qty; } else np += ly.qty;
+    });
+    qty += fifo.uncovered || 0;
+    var fb = round(np + (fifo.uncovered || 0), 4);
+    var out = { amount: null, unit: null, receiptQty: round(rq, 4), fallbackQty: fb, noPriceQty: round(np, 4), uncovered: fifo.uncovered || 0 };
+    if (!(rq > 0)) return out;                         // 입고 단가로 센 수량이 하나도 없으면 이 방법으로 셀 수 없음
+    if (fb > 0) { if (fallbackUnit == null || !isFinite(fallbackUnit)) return out; amt += fb * fallbackUnit; }
+    out.amount = round(amt, 2);
+    out.unit = qty > 0 ? round(amt / qty, 4) : null;
+    return out;
+  }
+  // 이동평균 단가(품목 하나). 입고·출고를 날짜 순으로 따라가며
+  //   입고:  평균 = (재고수량 × 평균 + 입고수량 × 입고단가) ÷ (재고수량 + 입고수량)
+  //   출고:  재고수량 −= 출고수량 (평균은 그대로). 재고수량이 0 아래로 가면 0 으로 두고 알립니다(clamped).
+  // 같은 날이면 입고를 먼저, 출고를 나중에 봅니다.
+  // o: { receipts: [[입고일, 수량, 단가]] (receiptIndex().byCode[품목] — 최근 순), issues: [[출고일, 수량]],
+  //      opening: { date, qty, amount } | null (전월 재고 — 있으면 전월 기준일의 수량·금액에서 시작, 그 뒤 입고·출고만 봄),
+  //      asOf: 기준일(Date 또는 'YYYY-MM-DD' — 이날까지) }
+  // opening 이 없으면 입고 이력의 첫 입고부터(시작 재고 0) 계산하고, 첫 입고보다 앞선 출고는 보지 않습니다.
+  // 단가가 비었거나 0 인 입고는 평균을 바꾸지 않고 수량만 더합니다(평균이 아직 없으면 수량도 넣지 않음) — noPrice 로 셉니다.
+  // 돌려주는 값: { avg, qty(계산상 기준일 재고수량), start: 'prev'|'history'|'none', startDate, receipts(쓴 입고 수), noPrice, clamped, clampedQty }
+  function movingAverage(o) {
+    o = o || {};
+    var asOf = o.asOf instanceof Date ? toDateStr(o.asOf) : (o.asOf ? toDateStr(parseDate(o.asOf)) : '');
+    var op = o.opening && o.opening.date ? o.opening : null;
+    var from = op ? (op.date instanceof Date ? toDateStr(op.date) : toDateStr(parseDate(op.date))) : '';
+    var ev = [];
+    (o.receipts || []).forEach(function (r) {
+      if (!r || !(r[1] > 0)) return;
+      if (asOf && r[0] > asOf) return;
+      if (from && r[0] <= from) return;
+      ev.push({ d: r[0], t: 0, q: r[1], p: r[2] });
+    });
+    ev.reverse();   // 최근 순 → 오래된 순(같은 날은 전표 순번 작은 것부터)
+    var out = { avg: null, qty: 0, start: op ? 'prev' : 'history', startDate: from, receipts: 0, noPrice: 0, clamped: 0, clampedQty: 0 };
+    if (op) {
+      out.qty = op.qty > 0 ? op.qty : 0;
+      if (op.qty > 0 && op.amount != null && isFinite(op.amount)) out.avg = op.amount / op.qty;
+    } else {
+      var first = '';
+      ev.forEach(function (e) { if (!first || e.d < first) first = e.d; });
+      if (!first) { out.start = 'none'; return out; }
+      from = first; out.startDate = first;
+    }
+    (o.issues || []).forEach(function (x) {
+      if (!x || !(x[1] > 0)) return;
+      if (asOf && x[0] > asOf) return;
+      if (op ? x[0] <= from : x[0] < from) return;
+      ev.push({ d: x[0], t: 1, q: x[1] });
+    });
+    // 안정 정렬: 날짜 → 입고(0) 먼저 → 넣은 순서
+    ev = ev.map(function (e, i) { e.i = i; return e; }).sort(function (a, b) { return a.d < b.d ? -1 : a.d > b.d ? 1 : (a.t - b.t) || (a.i - b.i); });
+    ev.forEach(function (e) {
+      if (e.t === 0) {
+        if (goodPrice(e.p)) {
+          out.avg = out.avg == null || !(out.qty > 0) ? e.p : (out.qty * out.avg + e.q * e.p) / (out.qty + e.q);
+          out.qty += e.q; out.receipts++;
+        } else {
+          out.noPrice++;
+          if (out.avg != null) out.qty += e.q;
+        }
+      } else {
+        out.qty -= e.q;
+        if (out.qty < -1e-9) { out.clamped++; out.clampedQty += -out.qty; out.qty = 0; }
+      }
+    });
+    out.avg = out.avg == null ? null : round(out.avg, 4);
+    out.qty = round(out.qty, 4); out.clampedQty = round(out.clampedQty, 4);
+    return out;
+  }
+  // 판매현황(월별 합) → 품목 하나의 출고 [[날짜, 수량]]. 판매현황은 달마다 합계만 남아 있어 그 달 말일에 한꺼번에 나간 것으로 봅니다(기획서 11.19).
+  // china: 파일마다 중국공장으로 맞은 거래처 목록(원자재 = 중국공장 판매) — null 이면 전체 판매
+  function salesIssuesOf(code, files, china) {
+    var out = [];
+    function add(mm) { Object.keys(mm || {}).forEach(function (k) { if (mm[k][0] > 0) out.push([toDateStr(monthEndOfKey(k)), mm[k][0]]); }); }
+    (files || []).forEach(function (f, i) {
+      if (!china) { add((f.byCode || {})[code]); return; }
+      (china[i] || []).forEach(function (cu) { add(((f.byCust || {})[cu] || {})[code]); });
+    });
+    return out;
+  }
+  // 출고 이력(날짜 있는 레코드) → 품목별 [[날짜, 수량]]
+  function issueMap(history) {
+    var out = {};
+    (history || []).forEach(function (h) {
+      var d = parseDate(h.date);
+      if (!d || !(h.qty > 0)) return;
+      (out[h.code] || (out[h.code] = [])).push([toDateStr(d), h.qty]);
+    });
+    return out;
+  }
+  var AMOUNT_BASIS_LABEL = { file: '현행(재고 파일 금액·단가표)', fifo: '선입선출 역산(구매현황 입고 단가)', mavg: '이동평균법(구매현황 입고 단가)' };
+  // 구분 하나의 단가 비교 요약 — 당월 재고가 있는 품목만. 계산 못 한 품목은 파일 금액으로 셈해 합계를 맞춥니다(Missing 로 셈).
+  function priceCompareSummary(items, sortOrder) {
+    var map = {}, order = [];
+    function blankRow(g) { return { group: g, items: 0, qty: 0, file: 0, fifo: 0, mavg: 0, fifoMissing: 0, mavgMissing: 0, fifoFallback: 0 }; }
+    var total = blankRow('합계');
+    items.forEach(function (it) {
+      if (!(it.curQty > 0) || !it.pc) return;
+      var g = map[it.group];
+      if (!g) { g = map[it.group] = blankRow(it.group); order.push(it.group); }
+      var pc = it.pc, f = pc.fileAmt || 0;
+      [g, total].forEach(function (x) {
+        x.items++; x.qty += it.curQty; x.file += f;
+        if (pc.fifoAmt != null) { x.fifo += pc.fifoAmt; if (pc.fifoFallbackQty > 0) x.fifoFallback++; } else { x.fifo += f; x.fifoMissing++; }
+        if (pc.mavgAmt != null) x.mavg += pc.mavgAmt; else { x.mavg += f; x.mavgMissing++; }
+      });
+    });
+    order.sort(groupSorter(sortOrder));
+    function fin(x) {
+      x.qty = round(x.qty, 4); x.file = round(x.file, 0); x.fifo = round(x.fifo, 0); x.mavg = round(x.mavg, 0);
+      x.fifoDiff = round(x.fifo - x.file, 0); x.mavgDiff = round(x.mavg - x.file, 0); x.mavgVsFifo = round(x.mavg - x.fifo, 0);
+      return x;
+    }
+    return { rows: order.map(function (k) { return fin(map[k]); }), total: fin(total) };
+  }
+
   // 이력 없음 칸 이름 — 「이력 없음(2025.01 이전)」
   function noHistoryLabel(histStart) { return '이력 없음(' + (histStart ? histStart.slice(0, 4) + '.' + histStart.slice(5, 7) : '입고 이력') + ' 이전)'; }
   // 품목 여러 개의 FIFO 층을 개월 칸으로 모읍니다(재고금액은 품목 금액을 수량 비율로 나눔).
@@ -2265,6 +2448,7 @@
       ['경과 개월 계산', '달력 월 차이. 기준일의 일이 시작일의 일보다 작으면 1을 빼되, 기준일이 말일이면 빼지 않음'],
       ['출고 이력 없는 품목', '재고 파일의 경과 개월 칸 → ' + (settings.noOutPolicy === 'none' ? '판정 보류' : '최근 입고일로 대신')],
       ['금액 산출', settings.amountSource === 'price' ? '단가표 우선, 없으면 파일 금액' : '파일 금액 우선, 없으면 단가표'],
+      ['단가 기준(당월 금액)', AMOUNT_BASIS_LABEL[res.amountBasis || 'file'] + (res.amountBasis && res.amountBasis !== 'file' ? ' — 셀 수 없는 품목은 현행 금액(품목별 「당월 금액 출처」). 전월 금액은 현행' : '')],
       ['원자재 대분류 묶음표', String(settings.groupMap || '').split(/\r?\n/).filter(Boolean).join(' / ') || '(없음 — 적힌 그대로)'],
       ['묶음표에 없는 대분류', settings.groupOthers === 'keep' ? '적힌 그대로' : '기타로 모음'],
       ['금액 증가 상위 건수', settings.topN], ['저회전 기준(회전율 미만)', settings.turnoverMax === '' ? '적용 안 함' : settings.turnoverMax],
@@ -2416,6 +2600,49 @@
     });
     return rows;
   }
+  // 단가 비교(11차): 세 방법의 설명 · 공장×구분 합계 · 구분별 대분류/고객사 합계 · 품목별
+  var PRICE_METHOD_NOTES = [
+    ['현행(파일 금액)', '회사 재고 파일에 적힌 금액(없으면 파일 단가 × 수량, 그다음 단가표)을 그대로 씁니다.'],
+    ['선입선출 역산', '지금 남아 있는 재고는 가장 최근에 들어온 물건이라고 봅니다. 최근 입고부터 거꾸로 쌓아 현재고를 채우고, 채운 수량마다 그 입고의 단가를 곱해 더합니다. 입고 이력으로 다 못 채운 수량은 파일 단가로 셉니다.'],
+    ['이동평균법', '물건이 들어올 때마다 「지금까지 재고의 평균 단가」를 다시 냅니다. 새 평균 = (남은 재고수량 × 이전 평균 + 입고수량 × 입고단가) ÷ (남은 재고수량 + 입고수량). 물건이 나갈 때는 수량만 줄고 평균은 그대로입니다. 전월 재고가 있으면 전월 금액 ÷ 전월 수량을 시작 평균으로 씁니다.'],
+    ['예', '100개를 10원에 들임 → 50개 나감 → 100개를 16원에 들임: 이동평균 = (50×10 + 100×16) ÷ 150 = 14원. 남은 120개를 선입선출 역산으로 세면 최근 100개×16원 + 그 앞 20개×10원 = 1,800원(단가 15원).']
+  ];
+  function priceCompareSheet(res) {
+    var rows = [['단가 기준 비교', '지금 당월 금액 기준: ' + AMOUNT_BASIS_LABEL[res.amountBasis || 'file'] + ' — 셀 수 없는 품목은 현행 금액']];
+    PRICE_METHOD_NOTES.forEach(function (x) { rows.push(x); });
+    if (!res.receipts) { rows.push([]); rows.push(['상태', '구매현황(입고)을 올리지 않아 선입선출 역산·이동평균을 계산하지 못했습니다']); return rows; }
+    rows.push(['출고 반영', '이동평균의 출고 = 출고 이력(날짜별) + 판매현황(달마다 합계라 그 달 말일에 나간 것으로 봄). 원자재는 판매현황 적용 대상 설정을 따릅니다']);
+    rows.push([]);
+    var sumHead = ['공장', '구분', '품목 수', '당월 수량', '파일 금액', '선입선출 역산 금액', '이동평균 금액', '차이(선입선출 − 파일)', '차이(이동평균 − 파일)', '차이(이동평균 − 선입선출)', '선입선출 못 셈(파일 금액으로)', '이동평균 못 셈(파일 금액으로)'];
+    rows.push(sumHead);
+    var secs = res.plantView ? [{ label: res.plantView, det: res }] : res.plants.rows.filter(function (r) { return r.has; }).map(function (r) { return { label: plantLabel(r.plant), det: r.detail }; }).concat([{ label: '합계', det: res }]);
+    secs.forEach(function (sc) {
+      KIND_ROWS.forEach(function (k) {
+        var pcs = sc.det[k[1]].priceCompare;
+        if (!pcs || !pcs.total.items) return;
+        var t = pcs.total;
+        rows.push([sc.label, k[0], t.items, t.qty, t.file, t.fifo, t.mavg, t.fifoDiff, t.mavgDiff, t.mavgVsFifo, t.fifoMissing, t.mavgMissing]);
+      });
+    });
+    KIND_ROWS.forEach(function (k) {
+      var pcs = res[k[1]].priceCompare;
+      if (!pcs || !pcs.total.items) return;
+      rows.push([]);
+      rows.push([k[0] + ' ' + (k[1] === 'raw' ? '대분류' : '고객사') + '별 (' + (res.plantView || '합계') + ')', '품목 수', '당월 수량', '파일 금액', '선입선출 역산 금액', '이동평균 금액', '차이(선입선출 − 파일)', '차이(이동평균 − 파일)', '차이(이동평균 − 선입선출)']);
+      pcs.rows.concat([pcs.total]).forEach(function (g) { rows.push([g.group, g.items, g.qty, g.file, g.fifo, g.mavg, g.fifoDiff, g.mavgDiff, g.mavgVsFifo]); });
+    });
+    rows.push([]);
+    rows.push(['구분', '품번', '품명', '대분류·고객사', '당월 수량', '파일 단가', '파일 금액', '파일 금액 출처', '선입선출 역산 단가', '선입선출 역산 금액', '이동평균 단가', '이동평균 금액', '이동평균 시작', '이동평균 계산 재고수량(참고)', '차이(선입선출 − 파일)', '차이(이동평균 − 파일)', '차이(이동평균 − 선입선출)', '당월 금액에 쓴 값', '비고']);
+    KIND_ROWS.forEach(function (k) {
+      res[k[1]].items.forEach(function (it) {
+        if (!(it.curQty > 0) || !it.pc) return;
+        var pc = it.pc;
+        rows.push([k[0], it.code, it.name, it.group, it.curQty, blank(pc.fileUnit), blank(pc.fileAmt), pc.fileSource, blank(pc.fifoUnit), blank(pc.fifoAmt), blank(pc.mavgUnit), blank(pc.mavgAmt), pc.mavgStartLabel, blank(pc.mavgQty),
+          blank(pc.fifoDiff), blank(pc.mavgDiff), blank(pc.mavgVsFifo), it.curAmtSource, pc.note]);
+      });
+    });
+    return rows;
+  }
   // memos: 지금 보기(공장 보기)의 메모 { raw: {...}, product: {...} }
   // memosByPlant: 공장별 메모 { '': 합계 보기, '인천': …, '대구': … } — 보고용 「원자재」 시트의 공장 구역마다 씁니다
   function buildSheets(res, settings, sample, memos, memosByPlant) {
@@ -2444,6 +2671,7 @@
       'Aging_개월별': bucketSheet(res),
       '판매현황_파일': salesSheet(res),
       '입고_FIFO': receiptSheet(res),
+      '단가_비교': priceCompareSheet(res),
       '관리대상': targetSheet(res),
       '단가_미매칭': unmatchedSheet(res),
       '기준': settingsSheet(res, settings, sample)
@@ -2453,6 +2681,7 @@
   var REPORT_SHEETS = ['총괄', '원자재', '반제품', '제품'];
 
   var api = {
+    fifoValue: fifoValue, movingAverage: movingAverage, salesIssuesOf: salesIssuesOf, priceCompareSummary: priceCompareSummary, AMOUNT_BASIS_LABEL: AMOUNT_BASIS_LABEL,
     PRESET_ACK: PRESET_ACK, scanReceipts: scanReceipts, readReceiptWorkbook: readReceiptWorkbook, receiptIndex: receiptIndex, fifoCover: fifoCover, agingAgree: agingAgree, noHistoryLabel: noHistoryLabel, BASIS_LABEL: BASIS_LABEL,
     KINDS: KINDS, KIND_LABEL: KIND_LABEL, scanSales: scanSales, readSalesWorkbook: readSalesWorkbook, sheetRows: sheetRows, salesHeaderDiff: salesHeaderDiff, salesIndex: salesIndex, salesCoverage: salesCoverage,
     parseReportBook: parseReportBook, reconcile: reconcile, parsePlantAlias: parsePlantAlias,
@@ -2469,7 +2698,7 @@
     lastDateByCode: lastDateByCode, sumQtyByCode: sumQtyByCode, priceMapAt: priceMapAt, rate: rate, round: round,
     bucketLabels: bucketLabels, bucketOf: bucketOf, fitnessOf: fitnessOf,
     checkSettings: checkSettings, analyze: analyze, decompose: decompose, causeSentence: causeSentence, buildCausePrompt: buildCausePrompt,
-    buildSheets: buildSheets, REPORT_SHEETS: REPORT_SHEETS, pct: pct
+    buildSheets: buildSheets, priceCompareSheet: priceCompareSheet, PRICE_METHOD_NOTES: PRICE_METHOD_NOTES, REPORT_SHEETS: REPORT_SHEETS, pct: pct
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.InvLogic = api;

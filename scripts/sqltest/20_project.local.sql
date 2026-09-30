@@ -126,6 +126,11 @@ begin
   perform public._assert_eq((select dead_basis || '/' || dead_raw_months || dead_raw_op || '/' || coalesce(dead_semi_months::text, '없음') || '/' || dead_prod_months || dead_prod_op from public.app_settings),
     'file/12gt/없음/6ge'::text, '10차 총괄 불용 자동 판정 처음 값: 재고잔량분석 칸 · 원자재 12 초과 · 반제품 없음 · 제품 6 이상(답 B)');
   perform public._assert_raises($q$update public.app_settings set dead_prod_op = 'eq'$q$, '23514', '불용 기준 방식은 gt·ge 만');
+  perform public._assert_eq((select amount_basis from public.app_settings), 'file'::text, '11차 단가 기준 처음 값 = 현행(file)');
+  update public.app_settings set amount_basis = 'mavg';
+  perform public._assert_eq((select amount_basis from public.app_settings), 'mavg'::text, '단가 기준 이동평균법(mavg)으로 바꿀 수 있다');
+  update public.app_settings set amount_basis = 'file';
+  perform public._assert_raises($q$update public.app_settings set amount_basis = 'avg'$q$, '23514', '단가 기준은 file·fifo·mavg 만');
   perform public._assert_raises($q$update public.app_settings set dead_prod_months = -1$q$, '23514', '불용 기준 개월은 음수 불가');
   -- 구매현황: 파일 → 입고 줄 순서로 넣음. 한 파일 안의 똑같은 두 줄은 줄 번호로 둘 다 들어간다
   insert into public.receipt_file (file_name, header_row, mapping, title_from, title_to, stamp_date, partial, min_date, max_date, row_count, used_rows, months)
