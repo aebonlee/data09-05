@@ -52,6 +52,17 @@ begin
   raise notice '  OK   직접 적어 둔 칸 단위 줄은 그대로';
   if r.raw_china_sales <> 'on' or r.china_customers <> '' then raise exception 'FAIL  중국공장 칸(raw_china_sales·china_customers)이 더해지지 않았다'; end if;
   raise notice '  OK   예전 설정 행에 중국공장 판매 칸(켜짐·거래처 빈칸)이 더해진다';
+  if r.aging_basis_raw <> 'sale' or r.aging_basis_semi <> 'sale' or r.aging_basis_prod <> 'sale' or r.receipt_exclude <> '' then
+    raise exception 'FAIL  10차 칸(aging_basis_*·receipt_exclude) 처음 값이 아니다 (실제 % / % / %)', r.aging_basis_raw, r.aging_basis_semi, r.aging_basis_prod;
+  end if;
+  if (select aging_basis_raw || aging_basis_semi || aging_basis_prod from public.app_settings where owner_id = 'aaaaaaaa-0000-0000-0000-000000000002') <> 'filefilefile' then
+    raise exception 'FAIL  예전 aging_path = file 행이 세 구분 모두 file 로 옮겨지지 않았다';
+  end if;
+  raise notice '  OK   10차: Aging 기준 칸이 더해지고, 예전 「재고잔량분석 칸 먼저」 행은 세 구분 모두 file';
+  if r.dead_prod_months <> 6 or r.dead_prod_op <> 'ge' or r.dead_raw_months <> 12 or r.dead_semi_months is not null or r.dead_basis <> 'file' then
+    raise exception 'FAIL  10차 불용 자동 판정 칸이 처음 값으로 더해지지 않았다';
+  end if;
+  raise notice '  OK   10차: 예전 설정 행에 불용 자동 판정 칸(제품 6개월 이상 · 원자재 12개월 초과)이 더해진다';
   insert into public.upload_slot (owner_id, slot_id, part_key, plant, file_name)
     values ('aaaaaaaa-0000-0000-0000-000000000001', 'semiCur', 'plant:인천', '인천', '반제품.xlsx');
   raise notice '  OK   예전 판 위에서도 반제품 자리(semiCur)를 쓸 수 있다';
@@ -64,6 +75,9 @@ insert into public.app_settings (owner_id, aging_bounds, over_days, dead_days)
 -- v0.5(2026-09-30 오전) 판에만 있던 칸 단위 칸을 흉내: 1번 행 빈칸(처음 값 그대로), 2번 행 직접 적은 줄
 alter table public.app_settings add column recon_units text not null default '';
 update public.app_settings set recon_units = '대구 반제품 7월 금액=×10' where owner_id = 'aaaaaaaa-0000-0000-0000-000000000002';
+-- 3차~9차 판에만 있던 Aging 경로 칸을 흉내: 2번 행은 「재고잔량분석 칸 먼저(file)」를 골라 두었다 → 10차에서 세 구분 모두 file
+alter table public.app_settings add column aging_path text not null default 'out';
+update public.app_settings set aging_path = 'file' where owner_id = 'aaaaaaaa-0000-0000-0000-000000000002';
 with u as (insert into public.upload_slot (owner_id, slot_id, file_name)
            values ('aaaaaaaa-0000-0000-0000-000000000001', 'rawCur', 'old.xlsx') returning id)
 insert into public.stock_item (owner_id, upload_id, code, qty) select 'aaaaaaaa-0000-0000-0000-000000000001', id, 'RM-1', 5 from u;

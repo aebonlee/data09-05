@@ -58,7 +58,7 @@ begin
   perform public._assert(v_bad is null, '두 번 적용 후 표마다 정책 4개 (발견: ' || coalesce(v_bad, '없음') || ')');
   perform public._assert_eq(
     (select count(*) from pg_trigger where tgname like '%\_updated\_at' and not tgisinternal),
-    12::bigint, '두 번 적용 후 updated_at 트리거 12개');
+    14::bigint, '두 번 적용 후 updated_at 트리거 14개(10차 구매현황 표 2개 포함)');
 end $t$;
 
 do $t$ begin raise notice '[프로젝트] 함수 권한(proacl)'; end $t$;
@@ -84,7 +84,7 @@ set role authenticated;
 set request.jwt.claim.sub = 'aaaaaaaa-0000-0000-0000-000000000001';
 
 do $t$
-declare v_up bigint; v_mv bigint; v_pr bigint; v_sf bigint;
+declare v_up bigint; v_mv bigint; v_pr bigint; v_sf bigint; v_rf bigint;
 begin
   insert into public.app_settings (cur_date, prev_date) values ('2026-08-31', '2026-07-31');
   insert into public.column_mapping (def_key, mapping) values ('rawStock', '{"code":"자재코드","qty":"현재고"}')
@@ -120,6 +120,22 @@ begin
     'gt/ge/out/prod/1'::text, '3차 처음 값: 원자재 초과 · 반제품·제품 이상 · 최근 출고일 경로 · 판매현황 반제품·제품 · 허용 차이 1원');
   perform public._assert_eq((select recon_units from public.app_settings), E'총괄 금액=백만원\n* 금액=원'::text, '보고서 칸 단위 처음 값 = 총괄 백만원 · 나머지 원(9차 확정, 줄바꿈이 글자 \n 이 아니라 실제 줄바꿈)');
   perform public._assert_eq((select raw_china_sales || '/' || china_customers from public.app_settings), 'on/'::text, '원자재 중국공장 판매: 켜짐 · 거래처 빈칸(= 꺼짐과 같음)');
+  perform public._assert_eq((select aging_basis_raw || '/' || aging_basis_semi || '/' || aging_basis_prod || '/' || receipt_exclude from public.app_settings), 'sale/sale/sale/'::text,
+    '10차 Aging 기준 처음 값: 세 구분 모두 최근 출고일(sale) · 제외 적요 빈칸');
+  perform public._assert_raises($q$update public.app_settings set aging_basis_raw = 'fifo'$q$, '23514', 'Aging 기준은 receipt·sale·file 만');
+  perform public._assert_eq((select dead_basis || '/' || dead_raw_months || dead_raw_op || '/' || coalesce(dead_semi_months::text, '없음') || '/' || dead_prod_months || dead_prod_op from public.app_settings),
+    'file/12gt/없음/6ge'::text, '10차 총괄 불용 자동 판정 처음 값: 재고잔량분석 칸 · 원자재 12 초과 · 반제품 없음 · 제품 6 이상(답 B)');
+  perform public._assert_raises($q$update public.app_settings set dead_prod_op = 'eq'$q$, '23514', '불용 기준 방식은 gt·ge 만');
+  perform public._assert_raises($q$update public.app_settings set dead_prod_months = -1$q$, '23514', '불용 기준 개월은 음수 불가');
+  -- 구매현황: 파일 → 입고 줄 순서로 넣음. 한 파일 안의 똑같은 두 줄은 줄 번호로 둘 다 들어간다
+  insert into public.receipt_file (file_name, header_row, mapping, title_from, title_to, stamp_date, partial, min_date, max_date, row_count, used_rows, months)
+    values ('구매현황(26.06).xlsx', 2, '{"code":"품목코드","date":"입고일","qty":"수량"}', '2026-06-01', '2026-06-30', '2026-09-30', false, '2026-06-10', '2026-06-10', 3, 2, '{"2026-06": 2}') returning id into v_rf;
+  insert into public.receipt_line (receipt_file_id, line_no, receipt_date, slip, code, qty, price) values
+    (v_rf, 1, '2026-06-10', '1', 'S-1', 1000, 12), (v_rf, 2, '2026-06-10', '1', 'S-1', 1000, 12);
+  perform public._assert_eq((select count(*) from public.receipt_line), 2::bigint, 'receipt_line: 한 파일 안의 똑같은 두 줄(줄 번호 다름)');
+  perform public._assert_raises($q$insert into public.receipt_line (receipt_file_id, line_no, receipt_date, code, qty) select id, 1, '2026-06-11', 'S-2', 1 from public.receipt_file$q$,
+    '23505', 'receipt_line 같은 파일·같은 줄 번호는 한 행(upsert onConflict receipt_file_id,line_no)');
+  insert into public.column_mapping (def_key, mapping) values ('receipt', '{"code":"품목코드"}') on conflict do nothing;
   -- 반제품 자리 · 판매현황 · 보고서 · 확인함
   insert into public.upload_slot (slot_id, part_key, plant, file_name) values ('semiCur', 'plant:인천', '인천', '본사.xlsx');
   insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'semi', '고객1', '반제품 메모');
@@ -160,7 +176,7 @@ set request.jwt.claim.sub = 'bbbbbbbb-0000-0000-0000-000000000002';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm','sales_file','sales_month','report_file','recon_ack']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm','sales_file','sales_month','report_file','recon_ack','receipt_file','receipt_line']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'B 에게 A 의 ' || t || ' 가 안 보인다');
     perform public._assert_rows(format('update public.%I set updated_at = now()', t), 0, 'B 는 A 의 ' || t || ' 를 못 고친다');
@@ -197,6 +213,16 @@ begin
     format('insert into public.sales_month (sales_file_id, code, month, last_day) values (%s, %L, %L, 1)', v_sf, 'X', '2026-09'),
     '42501', 'B 가 A 의 sales_file id 를 알아도 판매현황 행을 붙이지 못한다');
 end $t$;
+reset role;
+do $t$
+declare v_rf bigint;
+begin
+  select id into v_rf from public.receipt_file limit 1;
+  execute 'set local role authenticated';
+  perform public._assert_raises(
+    format('insert into public.receipt_line (receipt_file_id, line_no, receipt_date, code, qty) values (%s, 9, %L, %L, 1)', v_rf, '2026-06-10', 'X'),
+    '42501', 'B 가 A 의 receipt_file id 를 알아도 입고 줄을 붙이지 못한다');
+end $t$;
 
 -- ----------------------------------------------------------------------------
 -- anon(비로그인)은 아무것도 못 보고 못 쓴다
@@ -208,7 +234,7 @@ set request.jwt.claim.sub = '';
 do $t$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm','sales_file','sales_month','report_file','recon_ack']
+  foreach t in array array['app_settings','column_mapping','upload_slot','stock_item','stock_movement','unit_price','cause_memo','dead_confirm','sales_file','sales_month','report_file','recon_ack','receipt_file','receipt_line']
   loop
     perform public._assert_rows(format('select 1 from public.%I', t), 0, 'anon 에게 ' || t || ' 가 안 보인다');
   end loop;

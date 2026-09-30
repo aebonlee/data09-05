@@ -27,6 +27,13 @@ for (const [name, sheets] of Object.entries(salesBooks)) {
   for (const [sn, aoa] of Object.entries(sheets)) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), sn);
   fs.writeFileSync(path.join(out, name), XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' }));
 }
+// 구매현황(가상) 5개 — 실데이터 구매현황 파일과 같은 열 구조(10차)
+const receiptBooks = Sample.receiptBooks();
+for (const [name, sheets] of Object.entries(receiptBooks)) {
+  const wb = XLSX.utils.book_new();
+  for (const [sn, aoa] of Object.entries(sheets)) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), sn);
+  fs.writeFileSync(path.join(out, name), XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' }));
+}
 for (const [name, aoa] of Object.entries(Sample.histories())) {
   // 엑셀에서 한글이 깨지지 않도록 UTF-8 BOM 을 붙입니다
   fs.writeFileSync(path.join(out, name), '﻿' + aoa.map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
@@ -64,10 +71,16 @@ for (const [name, sheets] of Object.entries(salesBooks)) {
   const b = L.scanSales(sheets['판매현황내역'], { fileName: name });
   if (a.missing.length || JSON.stringify(a.byCode) !== JSON.stringify(b.byCode)) { console.error('판매현황 왕복 불일치: ' + name); process.exit(1); }
 }
+// 구매현황: 앱과 같은 읽기(readReceiptWorkbook)로 다시 읽어 원본 표와 같은지
+for (const [name, sheets] of Object.entries(receiptBooks)) {
+  const a = L.readReceiptWorkbook(XLSX, new Uint8Array(fs.readFileSync(path.join(out, name))), name);
+  const b = L.scanReceipts(sheets['구매현황내역'], { fileName: name });
+  if (a.missing.length || JSON.stringify(a.rows) !== JSON.stringify(b.rows)) { console.error('구매현황 왕복 불일치: ' + name); process.exit(1); }
+}
 // 보고용 시트: 다시 읽어도 같은 구역·값
 for (const fn of Sample.REPORT_FILES) {
   const a = L.parseReportBook(readBook(fn), { fileName: fn });
   const b = L.parseReportBook({ names: Object.keys(wbs[fn]), sheets: wbs[fn] }, { fileName: fn });
   if (JSON.stringify(a.sections) !== JSON.stringify(b.sections)) { console.error('보고용 시트 왕복 불일치: ' + fn); process.exit(1); }
 }
-console.log('samples/ 생성·왕복 확인 완료: 통합문서 ' + Object.keys(wbs).length + '개, 판매현황 ' + Object.keys(salesBooks).length + '개, CSV 2개, 자리별 파일 ' + n + '건');
+console.log('samples/ 생성·왕복 확인 완료: 통합문서 ' + Object.keys(wbs).length + '개, 판매현황 ' + Object.keys(salesBooks).length + '개, 구매현황 ' + Object.keys(receiptBooks).length + '개, CSV 2개, 자리별 파일 ' + n + '건');

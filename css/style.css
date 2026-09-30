@@ -204,3 +204,9 @@ table.wide td:nth-child(2) { min-width: 8em; }
 .sales-card summary, .card summary { cursor: pointer; font-weight: 700; }
 tr.alarm-row td { background: #fff1ef; }
 .aging-chart .tick.open { font-size: 11px; fill: var(--dead); }
+/* 10차 — 구매현황(입고) 달별 칸 · Aging 기준 줄 · 입고 FIFO 상자 */
+.month-grid { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.month-cell { padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font-size: 0.85rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.month-cell.gap { border-color: var(--danger); color: #7a1c14; background: #fdecea; font-weight: 600; }
+.basis-line { margin: 4px 0 10px; padding: 8px 12px; border-left: 4px solid var(--primary); background: #eaf1fa; color: #123a66; border-radius: 0 var(--radius) var(--radius) 0; word-break: keep-all; overflow-wrap: break-word; }
+.fifo-box { margin-top: 18px; padding-top: 4px; border-top: 1px dashed var(--line); }

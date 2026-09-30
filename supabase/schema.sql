@@ -8,6 +8,8 @@
 --  재실행    : 안전합니다 (IF NOT EXISTS / CREATE OR REPLACE / DROP ... IF EXISTS 선행)
 --  2026-09-29 : Aging 을 일 → 개월로, 공장(인천·대구) 칸, 자리마다 파일 여러 개, 증감 원인 메모 표.
 --               예전 판을 이미 실행한 프로젝트에 다시 실행하면 1-B 절이 칸을 더하고 일 단위 설정을 개월로 바꿉니다.
+--  2026-09-30 저녁(10차) : 구매현황(입고) 표 2개(receipt_file·receipt_line), Aging 기준을 구분마다(aging_basis_raw/semi/prod),
+--               구매현황 제외 적요(receipt_exclude) — 1-D 절. aging_path 칸은 예전 판 호환으로 남겨 둡니다(앱은 쓰지 않음).
 --  2026-09-29 저녁(3차) : 원자재 장기재고 「초과」/반제품·제품 「이상」 방식 칸, 분포 최대 처음 값 36, Aging 경로·판매현황 적용 대상,
 --               반제품 자리(semiCur·semiPrev)·보고서 자리(report), 판매현황 표 2개, 보고서 대조 표 2개(1-C 절).
 --
@@ -25,6 +27,8 @@
 --    dead_confirm    불용 확정 품목(관련부서 확정 후 체크)  ← localStorage 'dead'
 --    sales_file      판매현황(출고) 파일 하나의 읽은 결과      ← localStorage 'sales'[] (byCode 제외)
 --    sales_month     품목·달별 출고수량·그 달 마지막 출고일    ← localStorage 'sales'[].byCode
+--    receipt_file    구매현황(입고) 파일 하나의 읽은 결과     ← localStorage 'receipts'[] (rows 제외)
+--    receipt_line    구매현황 입고 줄(입고일·품목·수량…)       ← localStorage 'receipts'[].rows
 --    report_file     회사 보고서(대조용) 보고용 시트 구역·합계  ← localStorage 'data'.report.parts[]
 --    recon_ack       대조 차이 중 「확인함」으로 표시한 것       ← localStorage 'reconAck'
 --
@@ -52,7 +56,18 @@ create table if not exists public.app_settings (
   long_prod_months int not null default 6,           -- 반제품·제품 장기재고 기준 개월
   long_prod_op     text not null default 'ge',        -- 반제품·제품: ge = 「이상」
   aging_max_months int not null default 36,          -- 개월별 분포를 몇 개월까지 한 칸씩(그 위는 「N개월 초과」)
-  aging_path       text not null default 'out',       -- out = 최근 출고일 기준 / file = 재고잔량분석 칸 먼저(예전)
+  aging_path       text not null default 'out',       -- (예비) 예전 Aging 경로 한 칸 — 10차부터 aging_basis_* 를 씀
+  aging_basis_raw  text not null default 'sale',      -- Aging 기준(10차): receipt = 입고 FIFO / sale = 최근 출고일 / file = 재고잔량분석 칸
+  aging_basis_semi text not null default 'sale',
+  aging_basis_prod text not null default 'sale',
+  receipt_exclude  text not null default '',          -- 구매현황에서 빼고 쌓을 적요(한 줄에 하나, 「*」 가능)
+  dead_basis       text not null default 'file',      -- 총괄 불용 자동 판정 개월(10차): file = 재고잔량분석 칸 / shown = Aging 표시 기준
+  dead_raw_months  int default 12,                    -- 원자재 불용 기준 개월(null = 자동 판정 없음, 체크만)
+  dead_raw_op      text not null default 'gt',
+  dead_semi_months int,                               -- 반제품 — 처음 값 없음(답을 받지 못함)
+  dead_semi_op     text not null default 'ge',
+  dead_prod_months int default 6,                     -- 제품 — 6개월 이상(2026-09-30 답 B)
+  dead_prod_op     text not null default 'ge',
   sales_scope      text not null default 'prod',      -- 판매현황 최근 출고일 적용 대상: prod = 반제품·제품 / all = 원자재까지
   recon_tolerance  numeric not null default 1,        -- 보고서 대조 허용 차이(원)
   plant_alias      text not null default '',          -- 보고서 구역 이름 → 공장(한 줄에 「구역이름=대구」)
@@ -327,7 +342,7 @@ alter table public.app_settings add constraint app_settings_round3_check check (
 -- 반제품 자리·종류 (CREATE 안의 CHECK 이름은 PostgreSQL 이 붙인 <표>_<칸>_check)
 alter table public.column_mapping drop constraint if exists column_mapping_def_key_check;
 alter table public.column_mapping add constraint column_mapping_def_key_check
-  check (def_key in ('rawStock', 'semiStock', 'productStock', 'inbound', 'outbound', 'price'));
+  check (def_key in ('rawStock', 'semiStock', 'productStock', 'inbound', 'outbound', 'price', 'receipt'));
 alter table public.upload_slot drop constraint if exists upload_slot_slot_id_check;
 alter table public.upload_slot add constraint upload_slot_slot_id_check
   check (slot_id in ('rawCur', 'rawPrev', 'semiCur', 'semiPrev', 'prodCur', 'prodPrev', 'inbound', 'outbound', 'price'));
@@ -401,6 +416,90 @@ create table if not exists public.recon_ack (
   constraint recon_ack_owner_key unique (owner_id, ack_key)
 );
 
+-- ----------------------------------------------------------------------------
+-- 1-D. 2026-09-30 저녁(10차) — 구매현황(입고) · Aging 기준(구분마다)
+--      aging_basis_raw 칸이 처음 생길 때 한 번만: 예전에 aging_path = 'file'(재고잔량분석 칸 먼저)이던 행은 세 구분 모두 file 로
+--      옮깁니다(앱의 migrateSettings round10 과 같은 규칙). 새로 설치하면 위 CREATE 에 이미 있어 바꾸는 것이 없습니다.
+-- ----------------------------------------------------------------------------
+do $r10$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'app_settings' and column_name = 'aging_basis_raw') then
+    alter table public.app_settings add column aging_basis_raw text not null default 'sale';
+    alter table public.app_settings add column if not exists aging_basis_semi text not null default 'sale';
+    alter table public.app_settings add column if not exists aging_basis_prod text not null default 'sale';
+    update public.app_settings set aging_basis_raw = 'file', aging_basis_semi = 'file', aging_basis_prod = 'file' where aging_path = 'file';
+  end if;
+end;
+$r10$;
+alter table public.app_settings add column if not exists aging_basis_semi text not null default 'sale';
+alter table public.app_settings add column if not exists aging_basis_prod text not null default 'sale';
+alter table public.app_settings add column if not exists receipt_exclude  text not null default '';
+-- 총괄 불용 자동 판정(10차 답 B: 6개월 이상의 제품은 불용) — 앱 defaultSettings 의 dead* 와 같은 처음 값
+alter table public.app_settings add column if not exists dead_basis       text not null default 'file';
+alter table public.app_settings add column if not exists dead_raw_months  int default 12;
+alter table public.app_settings add column if not exists dead_raw_op      text not null default 'gt';
+alter table public.app_settings add column if not exists dead_semi_months int;
+alter table public.app_settings add column if not exists dead_semi_op     text not null default 'ge';
+alter table public.app_settings add column if not exists dead_prod_months int default 6;
+alter table public.app_settings add column if not exists dead_prod_op     text not null default 'ge';
+alter table public.app_settings drop constraint if exists app_settings_round10_check;
+alter table public.app_settings add constraint app_settings_round10_check check (
+  aging_basis_raw in ('receipt', 'sale', 'file') and aging_basis_semi in ('receipt', 'sale', 'file') and aging_basis_prod in ('receipt', 'sale', 'file'));
+alter table public.app_settings drop constraint if exists app_settings_dead_check;
+alter table public.app_settings add constraint app_settings_dead_check check (
+  dead_basis in ('file', 'shown') and dead_raw_op in ('gt', 'ge') and dead_semi_op in ('gt', 'ge') and dead_prod_op in ('gt', 'ge')
+  and coalesce(dead_raw_months, 0) >= 0 and coalesce(dead_semi_months, 0) >= 0 and coalesce(dead_prod_months, 0) >= 0);
+
+-- 구매현황 파일 하나 — 앱 scanReceipts() 결과에서 입고 줄(rows)을 뺀 것
+create table if not exists public.receipt_file (
+  id          bigint generated always as identity primary key,
+  owner_id    uuid not null default auth.uid(),
+  file_name   text not null check (length(btrim(file_name)) > 0),
+  sheet_name  text not null default '',
+  header_row  int not null default 1 check (header_row >= 1),
+  mapping     jsonb not null default '{}'::jsonb check (jsonb_typeof(mapping) = 'object'),  -- {code, date, qty, price, group, supplier, po, note}
+  title_from  date,
+  title_to    date,
+  stamp_date  date,
+  partial     boolean not null default false,         -- 마감 전 내려받음(출력일 ≤ 제목 기간 끝)
+  min_date    date,
+  max_date    date,
+  row_count   int not null default 0 check (row_count >= 0),
+  used_rows   int not null default 0 check (used_rows >= 0),
+  months      jsonb not null default '{}'::jsonb check (jsonb_typeof(months) = 'object'),   -- {'YYYY-MM': 줄 수} — 빈 달 찾기
+  skipped     jsonb not null default '{}'::jsonb check (jsonb_typeof(skipped) = 'object'),
+  sample      boolean not null default false,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  -- 같은 이름 파일을 다시 올리면 바꿔 넣습니다 — ⚠ upsert 시 onConflict: 'owner_id,file_name'
+  constraint receipt_file_owner_name_key unique (owner_id, file_name),
+  constraint receipt_file_dates_check check (min_date is null or max_date is null or min_date <= max_date)
+);
+
+-- 입고 줄 — 앱 rows[i] = [입고일, 전표 순번, 품목코드, 수량, 단가, 거래처코드, 발주번호, 대분류, 적요].
+-- 한 파일 안에 똑같은 줄이 둘 있을 수 있어(실데이터) 줄 번호(line_no)로 구분합니다. 파일 사이 겹친 줄은 앱이 분석 때 한 번만 셉니다.
+create table if not exists public.receipt_line (
+  id              bigint generated always as identity primary key,
+  owner_id        uuid not null default auth.uid(),
+  receipt_file_id bigint not null references public.receipt_file(id) on delete cascade,
+  line_no         int not null check (line_no >= 1),
+  receipt_date    date not null,
+  slip            text not null default '',
+  code            text not null check (length(btrim(code)) > 0),
+  qty             numeric not null,                   -- 반품은 음수(앱은 쌓지 않고 세기만)
+  price           numeric,
+  supplier_code   text not null default '',
+  po_no           text not null default '',
+  group_name      text not null default '',
+  note            text not null default '',
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  -- ⚠ upsert 시 onConflict: 'receipt_file_id,line_no'
+  constraint receipt_line_file_line_key unique (receipt_file_id, line_no)
+);
+create index if not exists receipt_line_code_idx on public.receipt_line (code, receipt_date desc);
+
 -- 공장: 분석 대상 밖(중국)은 앱이 읽을 때 빼므로 DB 에도 들어오지 않게 막습니다
 alter table public.upload_slot    drop constraint if exists upload_slot_plant_check;
 alter table public.upload_slot    add  constraint upload_slot_plant_check    check (plant in ('', '인천', '대구'));
@@ -429,7 +528,7 @@ declare t text;
 begin
   foreach t in array array['app_settings','column_mapping','upload_slot',
                            'stock_item','stock_movement','unit_price','cause_memo','dead_confirm',
-                           'sales_file','sales_month','report_file','recon_ack']
+                           'sales_file','sales_month','report_file','recon_ack','receipt_file','receipt_line']
   loop
     execute format('drop trigger if exists %I on public.%I', t || '_updated_at', t);
     execute format('create trigger %I before update on public.%I
@@ -454,12 +553,14 @@ alter table public.sales_file     enable row level security;
 alter table public.sales_month    enable row level security;
 alter table public.report_file    enable row level security;
 alter table public.recon_ack      enable row level security;
+alter table public.receipt_file   enable row level security;
+alter table public.receipt_line   enable row level security;
 
 -- 부모가 없는 표: owner_id 만 봅니다
 do $rls$
 declare t text;
 begin
-  foreach t in array array['app_settings','column_mapping','upload_slot','cause_memo','dead_confirm','sales_file','report_file','recon_ack']
+  foreach t in array array['app_settings','column_mapping','upload_slot','cause_memo','dead_confirm','sales_file','report_file','recon_ack','receipt_file']
   loop
     execute format('drop policy if exists %I on public.%I', t || '_select', t);
     execute format('drop policy if exists %I on public.%I', t || '_insert', t);
@@ -508,6 +609,23 @@ begin
   execute format('create policy sales_month_insert on public.sales_month for insert to authenticated with check (%s)', v_par);
   execute format('create policy sales_month_update on public.sales_month for update to authenticated using (%s) with check (%s)', v_own, v_par);
   execute format('create policy sales_month_delete on public.sales_month for delete to authenticated using (%s)', v_own);
+end;
+$rls$;
+
+-- 구매현황 입고 줄 표: 본인 행이면서, 붙는 receipt_file 도 본인 것이어야 합니다
+do $rls$
+declare
+  v_own text := 'owner_id = auth.uid()';
+  v_par text := 'owner_id = auth.uid() and exists (select 1 from public.receipt_file f where f.id = receipt_file_id and f.owner_id = auth.uid())';
+begin
+  drop policy if exists receipt_line_select on public.receipt_line;
+  drop policy if exists receipt_line_insert on public.receipt_line;
+  drop policy if exists receipt_line_update on public.receipt_line;
+  drop policy if exists receipt_line_delete on public.receipt_line;
+  execute format('create policy receipt_line_select on public.receipt_line for select to authenticated using (%s)', v_own);
+  execute format('create policy receipt_line_insert on public.receipt_line for insert to authenticated with check (%s)', v_par);
+  execute format('create policy receipt_line_update on public.receipt_line for update to authenticated using (%s) with check (%s)', v_own, v_par);
+  execute format('create policy receipt_line_delete on public.receipt_line for delete to authenticated using (%s)', v_own);
 end;
 $rls$;
 

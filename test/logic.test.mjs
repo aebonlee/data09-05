@@ -386,11 +386,11 @@ test('제품 분포는 6개월 칸부터 장기재고, 최대 24개월이면 「
   assert.equal(b['5개월'].long, false); assert.equal(b['6개월'].long, true); assert.ok(b['24개월 초과']);
   assert.deepEqual(r.product.items.map(i => i.code + ':' + i.fitness), ['P:장기재고', 'Q:정상']);
 });
-test('불용은 사람이 확정한 품목만 — 총괄 정상/불용 2단계', () => {
+test('원자재 불용은 사람이 확정한 품목만(자동 기준 비움) — 총괄 정상/불용 2단계', () => {
   const r = L.analyze(data, settings, { dead: { raw: { B: true } } });
   assert.equal(r.raw.items.find(i => i.code === 'B').deadConfirmed, true);
   const o = Object.fromEntries(r.raw.overall.map(x => [x.label, x]));
-  assert.deepEqual([o['정상'].count, o['불용(확정)'].count, o['불용(확정)'].amount], [2, 1, 250]);
+  assert.deepEqual([o['정상'].count, o['불용'].count, o['불용'].amount, o['불용'].confirmedCount, o['불용'].autoCount], [2, 1, 250, 1, 0]);
   assert.ok(r.targets.find(t => t.code === 'B').reasons.includes('불용 확정'));
   assert.equal(res.raw.overall[1].count, 0);
 });
@@ -478,14 +478,14 @@ test('인천 보기: 인천 것만(10, 금액 증감 +20)', () => {
 });
 
 console.log('엑셀 시트');
-test('시트 21개 — 보고용 4개(총괄·원자재·반제품·제품)가 맨 앞, 백데이터 표 시트는 머리행과 자료 행의 칸 수가 같다', () => {
+test('시트 22개(10차 「입고_FIFO」 더함) — 보고용 4개(총괄·원자재·반제품·제품)가 맨 앞, 백데이터 표 시트는 머리행과 자료 행의 칸 수가 같다', () => {
   const sheets = L.buildSheets(res, settings, false, { raw: { '원료': { memo: '메모', ai: '해설' } } });
   const names = Object.keys(sheets);
-  assert.equal(names.length, 21);
+  assert.equal(names.length, 22);
   assert.deepEqual(names.slice(0, 4), ['총괄', '원자재', '반제품', '제품']);
   assert.deepEqual(L.REPORT_SHEETS, ['총괄', '원자재', '반제품', '제품']);
   for (const [name, rows] of Object.entries(sheets)) {
-    if (L.REPORT_SHEETS.includes(name) || ['Aging_개월별', '기준', '대조_차이알람', '판매현황_파일'].includes(name)) continue;
+    if (L.REPORT_SHEETS.includes(name) || ['Aging_개월별', '기준', '대조_차이알람', '판매현황_파일', '입고_FIFO'].includes(name)) continue;
     rows.slice(1).forEach(r => assert.equal(r.length, rows[0].length, name));
   }
   assert.equal(sheets['원자재_품목별'].length, 1 + 4);
@@ -620,7 +620,7 @@ test('판매현황 적용 대상 처음 값 = 반제품·제품만(원자재는 
   assert.deepEqual([r.raw.useSales, r.raw.items[0].agingBasis, r.product.useSales, r.product.items[0].agingBasis], [false, '파일 경과 개월', true, '출고일']);
 });
 test('예전 경로(재고잔량분석 칸 먼저)와 「반제품·제품만」 적용', () => {
-  const r = L.analyze(sd, { ...sset, agingPath: 'file' });
+  const r = L.analyze(sd, { ...sset, agingBasisRaw: 'file' });   // 10차: 예전 agingPath:'file' → 구분마다 agingBasis*
   assert.deepEqual([r.raw.items[0].agingShown, r.raw.items[0].agingBasis], [2, '파일 경과 개월']);
   assert.deepEqual([r.raw.items[0].agingAlt, r.raw.items[0].agingAltBasis], [15, '출고일']);
   const q = L.analyze(sd, { ...sset, salesScope: 'prod' });
@@ -968,9 +968,12 @@ test('예시 파일이 시트·머리행·짝·공장 짐작으로 모두 읽히
   const reps = Sample.REPORT_FILES.map(fn => L.parseReportBook({ names: Object.keys(wbs[fn]), sheets: wbs[fn] }, { fileName: fn, filePlant: L.plantFromFileName(fn) }));
   const r3 = L.analyze({ ...out, report: reps }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV });
   // 대구 반제품 7월 금액은 일부러 10배 → 9차 처음 값(나머지 시트 = 원 단위 확정)에서는 단위 차이가 아니라 알람(자릿수 입력 오류 의심)
-  assert.deepEqual(r3.recon.alarms.map(a => [a.plant, a.kindLabel, a.label, a.month, a.field, a.diff]),
-    [['인천', '원자재', '합계', 7, '금액', -1000], ['대구', '반제품', '합계', 7, '금액', -6750000]]);
-  assert.ok(/자릿수 입력 오류 의심/.test(r3.recon.alarms[1].note));
+  // 10차: 대구 반제품 7월 금액은 수강생 답(「확인함」)으로 미리 확인함 — 알람에서 빠지고 「확인함」 목록에(체크를 풀면 다시 알람)
+  assert.deepEqual(r3.recon.alarms.map(a => [a.plant, a.kindLabel, a.label, a.month, a.field, a.diff]), [['인천', '원자재', '합계', 7, '금액', -1000]]);
+  assert.deepEqual(r3.recon.acked.map(a => [a.plant, a.kindLabel, a.label, a.month, a.field, a.diff, !!a.ackPreset]), [['대구', '반제품', '합계', 7, '금액', -6750000, true]]);
+  assert.ok(/자릿수 입력 오류 의심/.test(r3.recon.acked[0].note));
+  const r3u = L.analyze({ ...out, report: reps }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV }, { reconAck: { '2026-08-31|대구|semi|합계|7|금액': false } });
+  assert.deepEqual(r3u.recon.alarms.map(a => [a.plant, a.kindLabel, a.month]), [['인천', '원자재', 7], ['대구', '반제품', 7]]);
   assert.deepEqual(r3.recon.unresolved, []);
   assert.deepEqual(r3.recon.units, []);
   // 총괄현황(백만원) 두 공장 × 자재·반제품·제품 × 7·8월 = 12칸, 단위를 맞추면 모두 같음
@@ -987,6 +990,172 @@ test('예시 파일이 시트·머리행·짝·공장 짐작으로 모두 읽히
   const h3 = r5.raw.items.find(i => i.code === 'H-1003');
   assert.deepEqual([r5.raw.salesMode, h3.lastOut, h3.lastOutSource, h3.agingShown], ['china', '2026-07-08', '판매현황', 1]);
   assert.equal(r2.raw.items.find(i => i.code === 'H-1003').lastOutSource, '');   // 설정 전: 원자재에 판매현황 안 씀
+});
+
+console.log('10차 — 구매현황(입고) 여러 파일 · 입고 FIFO Aging');
+// 예시 재고 자료(가상) — 앱의 자리별 읽기와 같은 흐름
+function sampleOut() {
+  const plan = Sample.build(), month = { rawCur: 8, prodCur: 8, semiCur: 8, rawPrev: 7, prodPrev: 7, semiPrev: 7 }, out = {};
+  for (const slot of L.SLOTS) {
+    out[slot.id] = [];
+    for (const part of plan[slot.id]) out[slot.id] = out[slot.id].concat(L.importTable(part.aoa, slot.def, { plant: L.plantFromFileName(part.fileName), avoidMonth: month[slot.id] ? 15 - month[slot.id] : null }).records);
+  }
+  return out;
+}
+const AS = new Date(2026, 7, 31);
+test('입고 FIFO — 딱 맞게 덮음: 26,000 = 8/18 12,000 + 8/2 14,000 → 가장 오래된 8/2, 0개월, 못 덮은 수량 0', () => {
+  const f = L.fifoCover(26000, [['2026-08-18', 12000], ['2026-08-02', 14000], ['2026-02-11', 5000]], AS);
+  assert.deepEqual(f.layers.map(x => [x.date, x.qty, x.months]), [['2026-08-18', 12000, 0], ['2026-08-02', 14000, 0]]);
+  assert.deepEqual([f.covered, f.uncovered, f.oldest, f.months], [26000, 0, '2026-08-02', 0]);   // 2/11 입고는 쓰지 않음
+});
+test('입고 FIFO — 일부만 씀: 19,200 = 12,000 + 5,000 + 7/12 입고 6,000 중 2,200 → 1개월', () => {
+  const f = L.fifoCover(19200, [['2026-08-20', 12000], ['2026-08-05', 5000], ['2026-07-12', 6000]], AS);
+  assert.deepEqual(f.layers.map(x => x.qty), [12000, 5000, 2200]);
+  assert.deepEqual([f.oldest, f.months, f.uncovered], ['2026-07-12', 1, 0]);
+});
+test('입고 FIFO — 현재고가 이력보다 많음: 25 중 10만 덮고 15 는 「이력 없음」', () => {
+  const f = L.fifoCover(25, [['2026-08-30', 10]], AS);
+  assert.deepEqual([f.covered, f.uncovered, f.oldest, f.months], [10, 15, '2026-08-30', 0]);
+  const none = L.fifoCover(600, undefined, AS);
+  assert.deepEqual([none.layers.length, none.covered, none.uncovered, none.oldest], [0, 0, 600, '']);
+});
+test('입고 FIFO — 기준일 뒤 입고는 건너뜀, 재고 0 이면 층 없음', () => {
+  const f = L.fifoCover(50, [['2026-09-03', 999], ['2026-08-20', 100]], AS);
+  assert.deepEqual(f.layers.map(x => x.date), ['2026-08-20']);
+  assert.equal(L.fifoCover(0, [['2026-08-20', 100]], AS).layers.length, 0);
+});
+const rrow = (d, slip, code, q, p = 100, sup = 'V1', po = '') => [d, slip, code, q, p, sup, po, 0, 0];
+test('겹친 기간 중복 제거 — 두 파일에 같은 줄은 한 번, 한 파일 안의 똑같은 두 줄은 둘 다', () => {
+  const a = { fileName: 'a', rows: [rrow('2026-06-10', '1', 'S', 1000), rrow('2026-06-10', '1', 'S', 1000), rrow('2026-06-11', '1', 'T', 5)], groups: [''], notes: [''] };
+  const b = { fileName: 'b', rows: [rrow('2026-06-10', '1', 'S', 1000), rrow('2026-06-10', '1', 'S', 1000), rrow('2026-07-01', '1', 'T', 7)], groups: [''], notes: [''] };
+  const ri = L.receiptIndex([a, b], { asOf: AS });
+  assert.deepEqual([ri.read, ri.kept, ri.overlap], [6, 4, 2]);
+  assert.deepEqual(ri.byCode.S, [['2026-06-10', 1000], ['2026-06-10', 1000]]);
+  // 수량이 다르면 다른 줄(겹침 아님)
+  const c = { fileName: 'c', rows: [rrow('2026-06-10', '1', 'S', 999)], groups: [''], notes: [''] };
+  assert.equal(L.receiptIndex([a, c]).kept, 4);
+});
+test('빈 달 찾기 — 첫 달 ~ (마지막 달·기준일 달 중 늦은 달) 사이 줄 0 인 달', () => {
+  const f = { fileName: 'x', rows: [rrow('2026-01-05', '1', 'A', 1), rrow('2026-03-02', '1', 'A', 1)], groups: [''], notes: [''] };
+  assert.deepEqual(L.receiptIndex([f], { asOf: new Date(2026, 4, 31) }).gaps, ['2026-02', '2026-04', '2026-05']);
+  assert.deepEqual(L.receiptIndex([f], {}).gaps, ['2026-02']);
+  assert.equal(L.receiptIndex([f]).histStart, '2026-01-01');
+});
+test('반품(음수)은 쌓지 않고 세기만, 적요 제외 규칙(「*」)', () => {
+  const f = { fileName: 'x', rows: [rrow('2026-08-01', '1', 'A', 10), rrow('2026-08-02', '1', 'A', -3), [...rrow('2026-08-03', '1', 'A', 4)].map((v, i) => i === 8 ? 1 : v)], groups: [''], notes: ['', '예시수출(가상)'] };
+  const ri = L.receiptIndex([f], { exclude: L.parseChinaCustomers('예시수출*') });
+  assert.deepEqual([ri.negative, ri.excluded, ri.byCode.A], [1, 1, [['2026-08-01', 10]]]);
+});
+test('구매현황 파일 읽기(가상 5개) — 19칸 머리행 짝, 전표 순번, 계·총합계·출력일 줄, 마감 전 파일', () => {
+  const rb = Sample.receiptBooks();
+  const fs = Object.entries(rb).map(([fn, b]) => L.scanReceipts(b['구매현황내역'], { fileName: fn }));
+  assert.ok(fs.every(f => !f.missing.length && f.headerRow === 2));
+  assert.deepEqual([fs[0].mapping.date, fs[0].mapping.code, fs[0].mapping.qty, fs[0].mapping.po, fs[0].mapping.note], ['입고일', '품목코드', '수량', '발주No.', '적요']);
+  assert.deepEqual(fs[3].rows.find(r => r[2] === 'H-1001' && r[0] === '2026-08-20').slice(0, 4), ['2026-08-20', '1', 'H-1001', 12000]);
+  assert.deepEqual(fs.map(f => f.partial), [false, false, false, false, true]);
+  assert.deepEqual([fs[0].titleFrom, fs[0].titleTo, fs[0].skipped['출력 일시 줄']], ['2025-07-01', '2026-02-28', 1]);
+  const ri = L.receiptIndex(fs, { asOf: AS });
+  assert.deepEqual([ri.gaps, ri.overlap, ri.negative, ri.histStart], [['2026-03'], 2, 1, '2025-07-01']);
+});
+test('분석 — 원자재 Aging 기준 「입고 FIFO」: 품목별 개월·이력 없음 칸·장기재고, 회사 칸과 비교', () => {
+  const rb = Sample.receiptBooks();
+  const receipts = Object.entries(rb).map(([fn, b]) => L.scanReceipts(b['구매현황내역'], { fileName: fn }));
+  const r = L.analyze({ ...sampleOut(), receipts }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV, agingBasisRaw: 'receipt' });
+  const it = c => r.raw.items.find(i => i.code === c);
+  assert.deepEqual([it('H-1001').agingShown, it('H-1001').agingBasis, it('H-1001').fifo.oldest], [1, '입고 FIFO', '2026-07-12']);   // 두 공장 합 19,200
+  assert.deepEqual([it('H-1002').agingShown, it('H-1002').bucket], [4, '4개월']);
+  // 이력 없음: 2025-07 이전 → 최소 14개월(2025-06-30 → 2026-08-31) 로 보고 「12개월 초과」 장기재고
+  assert.deepEqual([it('H-1003').bucket, it('H-1003').agingShown, it('H-1003').agingShownOpen, it('H-1003').fitness, it('H-1003').fifo.uncovered], ['이력 없음(2025.07 이전)', 14, true, '장기재고', 200]);
+  assert.deepEqual([it('SW-9001').bucket, it('D-8001').bucket], ['이력 없음(2025.07 이전)', '이력 없음(2025.07 이전)']);
+  assert.deepEqual(r.raw.fifoStats, { stock: 13, full: 10, partial: 2, none: 1, uncoveredQty: 815, uncoveredAmt: 1976000 });
+  assert.deepEqual([r.raw.fifoVsFile.same, r.raw.fifoVsFile.newer, r.raw.fifoVsFile.older], [10, 0, 3]);
+  assert.deepEqual(r.raw.fifoVsFile.diffs.map(d => d.code).sort(), ['H-1001', 'H-1002', 'SW-9001']);
+  const nh = r.raw.fifoBuckets.find(b => b.bucket === '이력 없음(2025.07 이전)');
+  assert.deepEqual([nh.qty, nh.items, nh.long], [815, 3, true]);
+  assert.equal(r.raw.buckets.find(b => b.bucket === '이력 없음(2025.07 이전)').count, 3);
+  assert.equal(r.raw.basis, 'receipt');
+  // 적요 제외: 8/15 T-3001 5,000(예시수출) 을 빼면 7/5 입고를 24,000 씀
+  const r2 = L.analyze({ ...sampleOut(), receipts }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV, agingBasisRaw: 'receipt', receiptExclude: '예시수출*' });
+  assert.deepEqual(r2.raw.items.find(i => i.code === 'T-3001').fifo.layers.map(x => x.qty), [20000, 60000, 24000]);
+  // 처음 값(최근 출고일): 입고 FIFO 표는 참고로만 만들어지고 표시 기준은 바뀌지 않음
+  const r3 = L.analyze({ ...sampleOut(), receipts }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV });
+  assert.deepEqual([r3.raw.basis, r3.semi.basis, r3.product.basis, !!r3.raw.fifoBuckets], ['sale', 'sale', 'sale', true]);
+  assert.ok(r3.raw.items.every(i => i.agingBasis !== '입고 FIFO'));
+});
+test('입고 FIFO 로 정했는데 구매현황이 없으면 최근 출고일 → 재고잔량분석 칸', () => {
+  const r = L.analyze(sampleOut(), { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV, agingBasisRaw: 'receipt' });
+  assert.equal(r.raw.items.find(i => i.code === 'C-5001').agingBasis, '파일 경과 개월');
+  assert.ok(/구매현황이 없어/.test(r.raw.basisUsed));
+  assert.equal(r.raw.fifoBuckets, null);
+});
+test('입고 이력 자리가 비면 구매현황이 입고 수량(증감 원인)으로', () => {
+  const d = { rawCur: [{ code: 'A', group: 'HSG', qty: 10, amount: 100 }], rawPrev: [{ code: 'A', group: 'HSG', qty: 4, amount: 40 }],
+    receipts: [{ fileName: 'x', rows: [rrow('2026-08-10', '1', 'A', 6), rrow('2026-07-10', '1', 'A', 2)], groups: [''], notes: [''] }] };
+  const it = L.analyze(d, { ...L.defaultSettings(), curDate: '2026-08-31' }).raw.items[0];
+  assert.deepEqual([it.inQty, it.inQtyPrev, it.lastIn], [6, 2, '2026-08-10']);
+});
+test('두 기준 개월 맞대기 — 열린 값(12개월 초과·이력 없음)은 범위로', () => {
+  assert.equal(L.agingAgree(3, false, 3, false), 'same');
+  assert.equal(L.agingAgree(2, false, 5, false), 'newer');
+  assert.equal(L.agingAgree(14, true, 13, true), 'same');     // 이력 없음 ↔ 12개월 초과
+  assert.equal(L.agingAgree(15, false, 13, true), 'same');    // 15개월 ↔ 12개월 초과
+  assert.equal(L.agingAgree(10, false, 13, true), 'newer');
+  assert.equal(L.agingAgree(14, true, 0, false), 'older');
+  assert.equal(L.agingAgree(null, false, 3, false), 'onlyAlt');
+});
+test('총괄 시트(실데이터 구조) — 공장 칸의 회사 내부 이름은 윗 「합계」에 섞이지 않고, 「이름=제외」·해외 구역이 있으면 합계는 맞대지 않음', () => {
+  const aoa = [['', '', '', '', '', '단위:백만원'], ['', '공장', '구분', '항목', '26년 07월', '26년 08월'],
+    ['', '합계', '자재', '정상', 5, 6], ['', '', '', '불용', 0, 0], ['', '', '계', '', 5, 6],
+    ['', '예시A', '자재', '정상', 2, 3], ['', '', '', '불용', 0, 0],
+    ['', '예시해외', '자재', '정상', 3, 3], ['', '', '', '불용', 0, 0]];
+  const sec = L.parseSummarySheet(aoa, '총괄');
+  assert.deepEqual(sec.rows.map(r => [r.plant, r.kindKey, r.v[7].amt]), [['합계', 'raw', 5], ['예시A', 'raw', 2], ['예시해외', 'raw', 3]]);
+  const d = { rawCur: [{ code: 'A', group: 'HSG', qty: 1, amount: 3000000, plant: '인천' }], rawPrev: [{ code: 'A', group: 'HSG', qty: 1, amount: 2000000, plant: '인천' }],
+    report: [{ fileName: '예시.xlsx', filePlant: '', sections: [sec] }] };
+  const set = { ...L.defaultSettings(), curDate: '2026-08-31' };
+  const a = L.analyze(d, set).recon;       // 이름을 짝짓지 않으면: 이름 줄은 「공장을 정하지 못한 구역」, 합계는 참고
+  assert.deepEqual([a.alarms.length, a.unitsOk, a.unresolved.length], [0, 0, 2]);
+  assert.ok(a.infos.some(i => /밖 구역/.test(i.note)));
+  const b = L.analyze(d, { ...set, plantAlias: '예시A=인천\n예시해외=제외' }).recon;
+  assert.deepEqual([b.alarms.length, b.unitsOk, b.unresolved.length], [0, 2, 0]);   // 인천 7·8월 백만원 같음
+  assert.equal(L.parsePlantAlias('예시해외=제외').map['예시해외'], '(제외)');
+});
+test('불용 자동 판정(10차 답 B) — 제품 6개월 이상: 5 정상 / 6·7 불용, 「불용 확정」은 언제나 불용, 원자재 12개월 초과, 반제품은 비움', () => {
+  const d = {
+    prodCur: [{ code: 'P5', group: 'c', qty: 1, amount: 10, agingFile: 5 }, { code: 'P6', group: 'c', qty: 1, amount: 20, agingFile: 6 }, { code: 'P7', group: 'c', qty: 1, amount: 40, agingFile: 7 }, { code: 'P2', group: 'c', qty: 1, amount: 80, agingFile: 2 }],
+    rawCur: [{ code: 'R12', group: 'HSG', qty: 1, amount: 1, agingFile: 12 }, { code: 'R13', group: 'HSG', qty: 1, amount: 2, agingFile: 13, agingFileOpen: true }],
+    semiCur: [{ code: 'S9', group: 'c', qty: 1, amount: 5, agingFile: 9 }]
+  };
+  const set = { ...L.defaultSettings(), curDate: '2026-08-31' };
+  assert.deepEqual([set.deadProdMonths, set.deadProdOp, set.deadRawMonths, set.deadRawOp, set.deadSemiMonths, set.deadBasis], [6, 'ge', 12, 'gt', '', 'file']);
+  const r = L.analyze(d, set, { dead: { product: { P2: true } } });
+  const dead = k => r[k].items.filter(i => i.dead).map(i => i.code + (i.deadAuto ? '' : '(확정)')).sort();
+  assert.deepEqual(dead('product'), ['P2(확정)', 'P6', 'P7']);
+  assert.deepEqual(dead('raw'), ['R13']);
+  assert.deepEqual(dead('semi'), []);
+  const o = r.product.overall[1];
+  assert.deepEqual([o.label, o.count, o.amount, o.autoCount, o.confirmedCount], ['불용', 3, 140, 2, 1]);
+  assert.ok(r.targets.find(t => t.code === 'P6').reasons.includes('불용(Aging 자동)'));
+  // 「초과」로 바꾸면 6 은 정상 · 개월을 비우면 확정만
+  assert.deepEqual(L.analyze(d, { ...set, deadProdOp: 'gt' }).product.items.filter(i => i.deadAuto).map(i => i.code), ['P7']);
+  assert.deepEqual(L.analyze(d, { ...set, deadProdMonths: '' }).product.items.filter(i => i.dead).map(i => i.code), []);
+  assert.ok(L.checkSettings({ ...set, deadProdMonths: '육' }).errors.some(e => /제품 불용 기준/.test(e)));
+});
+test('불용 판정 개월 — 처음 값은 재고잔량분석 칸, 「표시 기준」으로 바꾸면 최근 출고일 개월', () => {
+  const d = { prodCur: [{ code: 'P', group: 'c', qty: 1, amount: 10, agingFile: 8 }],
+    sales: [{ fileName: 's', byCode: { P: { '2026-08': [1, '2026-08-20'] } } }] };
+  const set = { ...L.defaultSettings(), curDate: '2026-08-31' };
+  const a = L.analyze(d, set).product.items[0];
+  assert.deepEqual([a.agingShown, a.agingBasis, a.deadAuto], [0, '출고일', true]);     // 표시는 판매일 0개월, 불용은 재고잔량분석 8개월 ≥ 6
+  assert.equal(L.analyze(d, { ...set, deadBasis: 'shown' }).product.items[0].deadAuto, false);
+});
+test('설정 옮기기(10차) — 예전 「재고잔량분석 칸 먼저」는 세 구분 모두 file, 처음 값이던 사람은 그대로', () => {
+  const d = L.defaultSettings();
+  const a = L.migrateSettings({ agingPath: 'file', chinaCustomers: '', longRawOp: 'gt' }, d);
+  assert.deepEqual([a.settings.agingBasisRaw, a.settings.agingBasisSemi, a.settings.agingBasisProd, a.round10], ['file', 'file', 'file', true]);
+  const b = L.migrateSettings({ agingPath: 'out', chinaCustomers: '', longRawOp: 'gt' }, d);
+  assert.deepEqual([b.settings.agingBasisRaw, b.settings.agingBasisSemi, b.round10], ['sale', 'sale', false]);
+  assert.equal(L.migrateSettings({ agingBasisRaw: 'receipt', agingPath: 'file' }, d).settings.agingBasisRaw, 'receipt');
 });
 
 console.log(process.exitCode ? '\n실패 있음' : '\n전부 통과 (' + passed + '개)');
