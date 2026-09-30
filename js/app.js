@@ -24,10 +24,14 @@
   // 기준 — 예전 「일」 단위(90·180·365일 등)로 저장된 설정은 「개월」로 자동 변환합니다.
   var mig = L.migrateSettings(S.getSettingsRaw(), L.defaultSettings());
   var settings = mig.settings;
-  if (mig.migrated || mig.round3) {
+  if (mig.migrated || mig.round3 || mig.round9) {
     S.setSettings(settings);
     setTimeout(function () {
-      toast(mig.round3
+      toast(mig.round9 === 'set' && !mig.round3 && !mig.migrated
+        ? '보고서 칸 단위를 9/30 답변대로 넣었습니다: 총괄(현황) 시트는 백만원, 나머지 시트는 원입니다. 원 단위 칸의 10배 차이는 이제 「단위 차이」가 아니라 알람(자릿수 입력 오류 의심)으로 보입니다.'
+        : mig.round9 === 'kept' && !mig.round3 && !mig.migrated
+        ? '9/30 답변으로 보고서 칸 단위 처음 값이 「총괄 금액=백만원 / * 금액=원」이 되었습니다. 직접 적어 두신 줄이 있어 그대로 두었습니다 — 「기준 설정 → 보고서 칸 단위」에서 두 줄을 더해 주세요.'
+        : mig.round3
         ? '기준이 바뀌었습니다(9/29 답변): 원자재는 ' + L.longLabel(settings.longRawMonths, settings.longRawOp) + ', 반제품·제품은 ' + L.longLabel(settings.longProdMonths, settings.longProdOp) + '을 장기재고로 보고, 개월별 분포는 0~' + settings.agingMaxMonths + '개월 + 「' + L.overLabel(settings.agingMaxMonths) + '」으로 보입니다. 「기준 설정」에서 확인해 주세요.'
         : 'Aging 기준이 바뀌었습니다: 개월별 분포(0·1·2…개월)로 보이고, 불용은 품목마다 「불용 확정」으로 체크합니다. 「기준 설정」에서 확인해 주세요.');
     }, 300);
@@ -458,6 +462,7 @@
         }).join(' · ')));
       }
     }
+    card.appendChild(customerBox());
     var partial = sales.filter(function (f) { return f.partial; });
     if (partial.length) card.appendChild(h('p', { class: 'alert info' }, partial.map(function (f) { return f.fileName; }).join(', ') + ' — 제목 기간(' + partial[0].titleTo + '까지)보다 앞선 ' + partial[0].stampDate + ' 에 내려받은 파일이라 그 뒤 출고는 아직 없습니다(월 중간분). 지금은 이 기준으로 봅니다 — 마감 뒤 월말까지 다시 내려받아 올리면 같은 달 파일로 바꿔 넣습니다.'));
     if (diff.length) card.appendChild(h('div', { class: 'alert info' }, h('p', null, '열 구성이 다른 파일이 있습니다 — 파일마다 짝을 따로 잡아 읽었습니다.'),
@@ -477,6 +482,28 @@
           td(h('button', { type: 'button', class: 'btn', onclick: function () { sales = sales.filter(function (x) { return x !== f; }); S.setSales(sales); render(); } }, '빼기')));
       }), { cls: 'wide' })));
     return card;
+  }
+  // 판매현황의 거래처 목록 — 중국공장 거래처를 기준 설정에 적도록 돕습니다(9/30 답변 1)
+  function customerBox() {
+    var rules = L.parseChinaCustomers(settings.chinaCustomers);
+    var noCol = sales.filter(function (f) { return !f.customerColumn; });
+    var list = L.salesCustomers(sales, rules);
+    var box = h('details', { class: 'customer-box', open: !rules.length && list.some(function (c) { return c.hint; }) ? true : null },
+      h('summary', null, '거래처 ' + list.length + '곳 — 중국공장 거래처 ' + (rules.length ? list.filter(function (c) { return c.matched; }).length + '곳 설정됨' : '미설정(원자재는 재고잔량분석 칸)')));
+    if (noCol.length) box.appendChild(h('p', { class: 'alert info' }, '거래처 칸을 저장하지 않은 파일 ' + noCol.length + '개(예전에 올렸거나 거래처 칸이 없음) — 중국공장 판매를 가리려면 다시 올려 주세요.'));
+    if (!list.length) return box;
+    var hints = list.filter(function (c) { return c.hint && !c.matched; });
+    if (hints.length) box.appendChild(h('div', { class: 'btn-row' }, h('span', { class: 'note' }, '이름에 중국·China 등이 든 거래처(후보): ' + hints.map(function (c) { return c.name; }).join(', ')),
+      h('button', { type: 'button', class: 'btn', onclick: function () {
+        var cur = String(settings.chinaCustomers || '').trim();
+        settings.chinaCustomers = (cur ? cur + '\n' : '') + hints.map(function (c) { return c.name; }).join('\n');
+        saveSettings(); render(); toast('후보 거래처를 「중국공장 거래처」에 넣었습니다 — 맞는지 「기준 설정」에서 확인해 주세요.');
+      } }, '후보를 중국공장 거래처로 넣기')));
+    box.appendChild(table(['거래처', n('판매 줄 수'), '중국공장'], list.slice(0, 200).map(function (c) {
+      return h('tr', null, td(c.name), td(fmt(c.rows), 'num'), td(c.matched ? '설정됨' : c.hint ? '후보' : ''));
+    }), { empty: '거래처가 없습니다.' }));
+    if (list.length > 200) box.appendChild(h('p', { class: 'note' }, '줄 수가 많은 200곳만 보입니다.'));
+    return box;
   }
   function salesProgressText() {
     var j = salesJob;
@@ -634,9 +661,17 @@
           h('small', { class: 'note' }, '분석 화면의 「기준 비교」 표에 다른 경로로 계산한 분포가 함께 나옵니다.')),
         h('label', { class: 'field' }, h('span', null, '판매현황 최근 출고일을 쓸 대상'),
           h('select', { name: 'salesScope' },
-            h('option', { value: 'prod', selected: settings.salesScope !== 'all' }, '반제품·제품만 (원자재는 재고잔량분석 칸)'),
-            h('option', { value: 'all', selected: settings.salesScope === 'all' }, '원자재·반제품·제품 모두')),
-          h('small', { class: 'note' }, '원자재는 판매가 아니라 생산에 투입되므로 판매현황에는 유상사급 판매분만 나옵니다. 그래서 처음 값은 반제품·제품만입니다.')),
+            h('option', { value: 'prod', selected: settings.salesScope !== 'all' }, '반제품·제품 (원자재는 아래 중국공장 판매 — 없으면 재고잔량분석 칸)'),
+            h('option', { value: 'all', selected: settings.salesScope === 'all' }, '원자재·반제품·제품 모두 (거래처 구분 없이 전체 판매)')),
+          h('small', { class: 'note' }, '원자재는 판매가 아니라 생산에 투입되므로 판매현황에는 유상사급 판매분도 섞여 나옵니다. 그래서 원자재는 중국공장 판매만 따로 봅니다(9/30 답변).')),
+        h('label', { class: 'field', 'data-field': 'rawChinaSales' }, h('span', null, '원자재 Aging — 중국공장 판매 기준'),
+          h('select', { name: 'rawChinaSales' },
+            h('option', { value: 'on', selected: settings.rawChinaSales !== 'off' }, '씀 — 아래 거래처를 적으면 그 판매의 최근 판매일로'),
+            h('option', { value: 'off', selected: settings.rawChinaSales === 'off' }, '쓰지 않음 (원자재는 재고잔량분석 칸)')),
+          h('small', { class: 'note' }, '9/30 답변: 한국 생산이 줄어 원자재는 중국공장 판매로 봐도 되고, 생산투입현황(자재 출고)은 BOM 구성이 맞지 않아 쓰지 않습니다. 거래처 칸이 비어 있으면 꺼진 것과 같습니다.')),
+        h('label', { class: 'field', 'data-field': 'chinaCustomers' }, h('span', null, '중국공장 거래처(판매현황 「거래처명」)'),
+          h('textarea', { name: 'chinaCustomers', rows: '3', placeholder: '예: ○○(중국)유한공사' }, settings.chinaCustomers || ''),
+          h('small', { class: 'note' }, '판매현황에는 공장·국가 칸이 없어, 중국공장으로 보는 거래처명(또는 거래처코드)을 한 줄에 하나씩 적어 주세요. 「*」는 아무 글자입니다(예: 「*중국*」). 「자료 → 판매현황」 아래에 파일에 나온 거래처 목록과 후보가 보입니다. 회사 거래처 이름이라 처음 값은 비어 있고, 이 브라우저에만 저장됩니다.')),
         h('label', { class: 'field' }, h('span', null, '출고 이력도 경과 개월 칸도 없는 품목'),
           h('select', { name: 'noOutPolicy' },
             h('option', { value: 'inbound', selected: settings.noOutPolicy !== 'none' }, '최근 입고일로 대신 계산'),
@@ -652,8 +687,8 @@
         num('reconTolerance', '허용 차이(원) — 이 금액 이하 차이는 알람 없음', '처음 값 1원. 수량은 0.5 이하 차이(소수 수량 반올림)를 뺍니다'),
         h('label', { class: 'field' }, h('span', null, '보고서 구역 이름 → 공장'), h('textarea', { name: 'plantAlias', rows: '3', placeholder: '예: ○○EO=대구' }, settings.plantAlias || ''),
           h('small', { class: 'note' }, '보고용 시트의 「○○기준」 구역 이름에 인천·본사·대구가 없으면 한 줄에 「구역이름=대구」처럼 적어 주세요. 회사 고유 이름이라 처음 값은 비어 있고, 이 브라우저에만 저장됩니다.')),
-        h('label', { class: 'field' }, h('span', null, '보고서 칸 단위'), h('textarea', { name: 'reconUnits', rows: '3', placeholder: '예: 대구 반제품 7월 금액=×10' }, settings.reconUnits || ''),
-          h('small', { class: 'note' }, '보고서 칸의 단위가 도구(원·개)와 다르면 한 줄에 「공장 구분 달 항목=배수」로 적어 주세요. 「×10」은 보고서 값이 10배로 적힌 칸, 「천원」은 천원 단위 칸입니다. 빠진 조건은 모두에 적용(예: 「인천 * 금액=천원」). 적지 않아도 정확히 10·100·1000배 차이는 「단위 차이」로 따로 보이고 알람에는 올리지 않습니다.'))),
+        h('label', { class: 'field' }, h('span', null, '보고서 칸 단위'), h('textarea', { name: 'reconUnits', rows: '3', placeholder: '총괄 금액=백만원\n* 금액=원' }, settings.reconUnits || ''),
+          h('small', { class: 'note' }, '처음 값은 9/30 답변대로 「총괄 금액=백만원」(총괄현황 시트)과 「* 금액=원」(원자재·반제품·제품 시트)입니다. 「총괄」로 시작하는 줄은 총괄 시트에만, 나머지 줄은 원자재·반제품·제품 시트에만 적용됩니다. 한 줄에 「(총괄) 공장 구분 달 항목=배수」 — 「×10」은 10배로 적힌 칸, 「천원」「백만원」은 그 단위 칸, 「원」은 단위가 같다고 확정한 칸입니다. 확정한 칸에서 정확히 10배 차이가 나면 알람(자릿수 입력 오류 의심)으로, 적지 않은 칸의 10·100·1000배 차이는 「단위 차이」로 따로 보입니다.'))),
       h('h2', null, '원자재 대분류 묶음표'),
       h('p', { class: 'note' }, 'ERP 대분류 코드를 보고서 대분류로 묶습니다. 한 줄에 「코드=보고서 대분류」. 품번으로 묶으려면 「품번:CI184-*=파크라케이블(CI184)」처럼 적습니다(품번 규칙이 먼저). 비우면 파일에 적힌 대분류 그대로 씁니다.'),
       h('div', { class: 'form-grid' },
@@ -679,7 +714,7 @@
       var next = {};
       Object.keys(L.defaultSettings()).forEach(function (k) {
         var el = form.elements[k];
-        next[k] = el ? (k === 'groupMap' || k === 'plantAlias' || k === 'reconUnits' ? el.value : el.value.trim()) : settings[k];
+        next[k] = el ? (k === 'groupMap' || k === 'plantAlias' || k === 'reconUnits' || k === 'chinaCustomers' ? el.value : el.value.trim()) : settings[k];
       });
       var chk = L.checkSettings(next);
       var box = form.querySelector('#settingsErrors');
@@ -748,7 +783,12 @@
     var notes = coverageNotes(kindKey);
     if (!parts(prevSlot).length) notes.push('전월 재고가 없어 모든 품목을 「신규」로 봅니다.');
     if (!res.hasHistory.outbound && !res.hasHistory.sales) notes.push('판매현황(출고)을 올리지 않아 최근 출고일 기준 Aging 과 회전율은 계산하지 못합니다. 재고 파일의 경과 개월 칸(재고잔량분석)이 있으면 그 값으로 Aging 을 표시합니다.');
-    else if (res.hasHistory.sales && !res[kindKey].useSales) notes.push('판매현황 최근 출고일은 기준 설정에 따라 ' + KIND_TEXT[kindKey] + '에 쓰지 않습니다(재고잔량분석 칸 사용).');
+    else if (res.hasHistory.sales && !res[kindKey].useSales) notes.push('판매현황 최근 출고일은 기준 설정에 따라 ' + KIND_TEXT[kindKey] + '에 쓰지 않습니다(재고잔량분석 칸 사용).' + (kindKey === 'raw' && settings.rawChinaSales !== 'off' ? ' 원자재를 중국공장 판매로 보려면 「기준 설정 → 중국공장 거래처」에 거래처명을 적어 주세요.' : ''));
+    else if (kindKey === 'raw' && res.raw.salesMode === 'china') {
+      var cn = res.sales.china || {};
+      notes.push('원자재 Aging 은 중국공장 거래처(' + (cn.customers && cn.customers.length ? cn.customers.join(', ') : '판매현황에서 찾지 못함') + ') 판매의 최근 판매일 기준입니다(9/30 답변). 그 판매가 없는 품목은 재고잔량분석 칸으로 봅니다.');
+      if (cn.filesNoCustomer && cn.filesNoCustomer.length) notes.push('거래처 칸을 저장하지 않은 예전 판매현황 ' + cn.filesNoCustomer.length + '개(' + cn.filesNoCustomer.slice(0, 3).join(', ') + (cn.filesNoCustomer.length > 3 ? ' 등' : '') + ')는 중국공장 판매를 가릴 수 없습니다 — 「자료」에서 다시 올려 주세요.');
+    }
     if (!res.hasHistory.inbound) notes.push('입고 이력이 없어 입고일 기준 Aging 을 계산하지 못합니다.');
     return notes.length ? h('div', { class: 'alert info' }, h('ul', null, notes.map(function (x) { return h('li', null, x); }))) : null;
   }
@@ -927,7 +967,7 @@
     var s = fmt(it.agingShown) + '개월';
     if (it.agingBasis === '입고일 대체') s += ' (입고일 대체)';
     if (it.agingBasis === '파일 경과 개월') s = (it.agingFileText || s) + ' (재고잔량분석)';
-    if (it.agingBasis === '출고일') s += it.lastOutSource === '판매현황' ? ' (판매현황)' : ' (출고 이력)';
+    if (it.agingBasis === '출고일') s += it.lastOutSource === '판매현황' ? (it.salesChina ? ' (판매현황·중국공장)' : ' (판매현황)') : ' (출고 이력)';
     return s;
   }
 
@@ -1141,7 +1181,8 @@
     var ns = needSettings(res); if (ns) { wrap.appendChild(ns); return wrap; }
     var rc = res.recon;
     wrap.appendChild(h('div', { class: 'alert info' },
-      h('p', null, '회사 보고서의 보고용 시트(원자재·반제품·제품)에 적힌 공장별 합계(수량·금액, ' + res.prevDate.slice(5, 7) + '월·' + res.curDate.slice(5, 7) + '월)를 도구가 상세 시트로 계산한 값과 맞대 봅니다. 합계 줄이 다르면 「차이」로 알람을 띄웁니다(허용 차이: 금액 ' + fmt(rc.tolerance) + '원, 수량 0.5).'),
+      h('p', null, '회사 보고서의 보고용 시트(총괄현황·원자재·반제품·제품)에 적힌 공장별 합계(수량·금액, ' + res.prevDate.slice(5, 7) + '월·' + res.curDate.slice(5, 7) + '월)를 도구가 상세 시트로 계산한 값과 맞대 봅니다. 합계 줄이 다르면 「차이」로 알람을 띄웁니다(허용 차이: 금액 ' + fmt(rc.tolerance) + '원, 수량 0.5).'),
+      h('p', null, '총괄현황 시트는 백만원 단위라(9/30 답변) 원으로 바꿔 공장·구분(자재·반제품·제품)별 정상+불용 금액을 도구의 재고금액 합계와 맞댑니다. 반올림 때문에 50만원(백만원의 절반)까지는 같음으로 봅니다. 원자재·반제품·제품 시트는 원 단위로 확정되어, 정확히 10배 차이가 나도 알람(자릿수 입력 오류 의심)입니다.'),
       h('p', null, '대분류·고객사 줄의 차이는 묶음표·고객사 표기 차이로도 생기므로 알람 대신 「참고」로만 보입니다. 알고 있는 차이는 「확인함」을 체크하면 알람에서 빠집니다(기준일마다 따로 저장).')));
     if (!rc.hasReport) {
       wrap.appendChild(h('div', { class: 'card' }, h('p', null, '아직 올린 회사 보고서가 없습니다.'), h('a', { class: 'btn btn-primary', href: '#/data' }, '「자료」에서 회사 보고서 올리기')));
@@ -1154,6 +1195,7 @@
       stat('차이(알람)', fmt(rc.alarms.length), '합계 줄', rc.alarms.length ? 'down' : ''),
       stat('확인함', fmt(rc.acked.length), '알람에서 뺀 차이'),
       stat('단위 차이', fmt(rc.units.length), '알람 아님 — 단위를 맞추면 같음'),
+      stat('총괄(백만원)', fmt(rc.unitsOk || 0), '단위 설정으로 맞춰 같은 칸'),
       stat('참고', fmt(rc.infos.length), '대분류·고객사 줄')));
     function rowsOf(list, status) {
       return list.map(function (a) {

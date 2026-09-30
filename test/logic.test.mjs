@@ -510,12 +510,20 @@ test('보고용 「원자재」 시트: 구역 제목 → 재고현황(07월)·(
 });
 test('보고용 「총괄」 시트: 공장·구분(자재·반제품·제품)·정상/불용, 전월·당월·증감, 계 / 불용 확정이 불용 줄로', () => {
   const r = L.analyze(data, settings, { dead: { raw: { B: true } } });
-  const sh = L.buildSheets(r, settings, false, {})['총괄'];
-  assert.deepEqual(sh[1], ['공장', '구분', '항목', '26년 07월', '26년 08월', '증감', '비고']);
+  // 9차: 총괄은 백만원(소수 첫째 자리). 이 예제 금액(원)은 작아서 단가를 1,000,000배로 키운 사본으로 봅니다
+  const big = { ...data, price: data.price.map(p => ({ ...p, price: p.price * 1e6 })) };
+  const r2 = L.analyze(big, settings, { dead: { raw: { B: true } } });
+  const sh = L.buildSheets(r2, settings, false, {})['총괄'];
+  assert.ok(String(sh[0][0]).startsWith('단위: 백만원'));
+  assert.deepEqual(sh[1], ['공장', '구분', '항목', '26년 07월 (백만원)', '26년 08월 (백만원)', '증감 (백만원)', '비고']);
   const i = sh.findIndex(x => x[0] === '합계');
-  assert.deepEqual(sh[i].slice(0, 6), ['합계', '자재', '정상', 1080, 1440, 360]);   // A·C·D (C 금액 없음)
+  assert.deepEqual(sh[i].slice(0, 6), ['합계', '자재', '정상', 1080, 1440, 360]);   // A·C·D (C 금액 없음) — 1,080,000,000원 = 1,080백만원
   assert.deepEqual(sh[i + 1].slice(0, 6), ['', '', '불용', 400, 250, -150]);        // B
   assert.deepEqual(sh[i + 6].slice(0, 6), ['', '계', '', 1480, 1690, 210]);
+  // 원 단위 예제는 백만원 소수 첫째 자리에서 0 — 원 단위 값은 「공장별_요약」 시트에 남습니다
+  const small = L.buildSheets(r, settings, false, {});
+  assert.deepEqual(small['총괄'][small['총괄'].findIndex(x => x[0] === '합계') + 6].slice(3, 6), [0, 0, 0]);
+  assert.ok(small['공장별_요약'].some(x => x.includes(1690)));
   assert.ok(sh.some(x => String(x[0]).startsWith('보고서 대조 자료 없음')));
 });
 test('보고용 「제품」 시트: 고객사별 전월·당월 수량·금액 + 경과 개월 칸별 당월 수량 + 총 합계', () => {
@@ -603,8 +611,8 @@ test('최근 출고일 기준(처음 값): 판매 있는 품목은 판매일, �
   assert.equal(r.raw.bucketsAlt.find(b => b.bucket === '2개월').count, 1);
   assert.equal(r.raw.buckets.find(b => b.bucket === '15개월').count, 1);
   assert.equal(r.hasHistory.sales, true);
-  assert.deepEqual(r.salesCoverage.raw, { stock: 2, withSale: 1, used: true });
-  assert.deepEqual(r.salesCoverage.product, { stock: 2, withSale: 1, used: true });
+  assert.deepEqual(r.salesCoverage.raw, { stock: 2, withSale: 1, used: true, mode: 'all' });
+  assert.deepEqual(r.salesCoverage.product, { stock: 2, withSale: 1, used: true, mode: 'all' });
 });
 test('판매현황 적용 대상 처음 값 = 반제품·제품만(원자재는 판매가 아니라 생산 투입이라)', () => {
   assert.equal(L.defaultSettings().salesScope, 'prod');
@@ -721,9 +729,10 @@ test('정확히 10의 거듭제곱 배만 단위 차이: 1000/100 → ×10, 1,23
 // 인천 원자재 8월 합계 금액: 도구 1690, 보고서를 16900(정확히 10배)으로 바꾼 사본
 const repX10 = JSON.parse(JSON.stringify(rep));
 repX10.sections[0].rows.find(r => r.total).v[8].amt = 16900;
+const pset0 = { ...pset, reconUnits: '' };   // 칸 단위 설정을 비운 경우(9차 처음 값은 「총괄 금액=백만원 / * 금액=원」)
 test('설정 없이도 정확히 10배 차이는 알람이 아니라 「단위 차이」(제안 설정 줄과 함께)', () => {
-  const r = L.analyze(pdat, pset);
-  const rc = L.reconcile(r, [repX10], L.checkSettings(pset), {});
+  const r = L.analyze(pdat, pset0);
+  const rc = L.reconcile(r, [repX10], L.checkSettings(pset0), {});
   assert.equal(rc.alarms.length, 0);
   assert.deepEqual(rc.units.map(u => [u.plant, u.label, u.month, u.field, u.factor, u.unitSource, u.reportConv, u.suggest]),
     [['인천', '합계', 8, '금액', 10, 'auto', 1690, '인천 원자재 8월 금액=×10']]);
@@ -738,10 +747,171 @@ test('단위 설정 ×10 → 「단위 설정」으로 확정, ×100 이면 바�
   assert.deepEqual([same.alarms.length, same.units.length, same.alarms[0].diff], [1, 0, -15210]);
 });
 test('단위 차이는 엑셀 「대조_차이알람」 시트와 총괄 아래에 「단위 차이」로 나옴', () => {
-  const r = L.analyze({ ...pdat, report: [repX10] }, pset);
-  const sh = L.buildSheets(r, pset, false, {});
+  const r = L.analyze({ ...pdat, report: [repX10] }, pset0);
+  const sh = L.buildSheets(r, pset0, false, {});
   assert.ok(sh['대조_차이알람'].some(x => String(x[9]).startsWith('단위 차이')));
   assert.ok(sh['총괄'].some(x => x[0] === '차이 0건, 단위 차이 1건(알람 아님)'));
+});
+
+console.log('9차 답변 3 — 총괄현황 = 백만원, 나머지 시트 = 원');
+test('처음 값 「총괄 금액=백만원 / * 금액=원」: 총괄 줄은 총괄 시트에만, 나머지 줄은 원자재·반제품·제품 시트에만', () => {
+  const s = L.defaultSettings();
+  assert.equal(s.reconUnits, '총괄 금액=백만원\n* 금액=원');
+  const u = L.parseReconUnits(s.reconUnits);
+  assert.deepEqual(u.errors, []);
+  assert.deepEqual(u.rules.map(r => [r.sheet, r.plant, r.kind, r.field, r.factor]), [['summary', '', '', '금액', 0.000001], ['', '', '', '금액', 1]]);
+  assert.deepEqual(L.parseReconUnits('총괄현황 대구 자재 7월 금액=천원').rules.map(r => [r.sheet, r.plant, r.kind, r.month, r.factor]), [['summary', '대구', 'raw', 7, 0.001]]);
+});
+test('백만원 ↔ 원 변환은 역수를 곱해 경계가 흔들리지 않음: 0.50169 백만원 = 501,690원, 반 단위 = 500,000원', () => {
+  assert.equal(L.unitToTool(0.50169, 0.000001), 501690);
+  assert.equal(L.halfUnit(0.000001), 500000);
+  assert.equal(L.halfUnit(0.001), 500);
+  assert.equal(L.detectUnitFactor(1.5, 1500000, 1), 0.000001);
+  assert.equal(L.detectUnitFactor(2, 1500000, 1), 0.000001);          // 2백만원 − 150만원 = 50만원 = 반 단위 → 같음(경계 포함)
+  assert.equal(L.detectUnitFactor(2, 1499999, 1), null);              // 500,001원 차이 → 단위 차이 아님
+});
+// 총괄 시트(가상): 공장 구역이 병합 셀처럼 첫 줄에만, 구분도 정상 줄에만. 인천·대구·「인천+대구 합계」·중국(제외) 구역, 금액은 백만원
+const sumAoa = [
+  ['총괄현황 (단위: 백만원)'],
+  ['공장', '구분', '항목', '2026.06', '2026.07', '2026.08', '증감(08-07)'],
+  ['인천', '자재', '정상', 9.9, 0.00108, 0.00144, 0],
+  ['', '', '불용', 0, 0.0004, 0.00025, 0],          // 정상 + 불용: 7월 0.00148 백만원 = 1,480원, 8월 0.00169 = 1,690원(pdat 인천 원자재와 같음)
+  ['', '반제품', '정상', 0, 0, 0, 0],
+  ['', '제품', '정상', 1.5, 14.8, 30.2, 15.4],       // 소수 금액 칸(14.8)을 달 머리로 잘못 읽지 않음
+  ['', '계', '', 11.4, 14.80148, 30.20325, 0],     // 「계」 줄은 읽지 않음
+  ['대구'],                                         // 숫자 없는 구역 제목
+  ['', '자재', '소계', 7, 7, 7, 0],                  // 구분 소계는 「계」로 보고 뺌(정상·불용 줄이 없으면 비교하지 않음)
+  ['', '제품', '', 2, 3, 4, 1],                      // 정상/불용 없이 구분 줄만 = 그 구분 합계
+  ['중국공장', '자재', '정상', 1, 1, 1, 0],          // 분석 제외 공장
+  ['인천+대구 합계', '자재', '정상', 5, 5, 5, 0]
+];
+test('총괄 시트 읽기: 달 머리(2026.07)·병합 셀 이어 읽기·계 줄 제외·구분 줄·중국 제외·합계 구역', () => {
+  const sec = L.parseSummarySheet(sumAoa, '총괄현황');
+  assert.deepEqual(sec.months, [6, 7, 8]);
+  assert.deepEqual(sec.rows.map(r => [r.plant, r.kindKey, r.v[7].amt, r.v[8].amt]), [
+    ['인천', 'raw', 0.00148, 0.00169], ['인천', 'semi', 0, 0], ['인천', 'product', 14.8, 30.2],
+    ['대구', 'product', 3, 4], ['(제외)', 'raw', 1, 1], ['합계', 'raw', 5, 5]]);
+  // 통합문서 안 시트 이름 「총괄현황」·「총괄」 모두 총괄로 읽음
+  assert.equal(L.parseReportBook({ names: ['총괄'], sheets: { '총괄': sumAoa } }).sections[0].kind, 'summary');
+});
+test('총괄 대조: 백만원 칸을 원으로 바꿔 맞댐 — 인천 자재 7·8월(1,480·1,690원) 같음, 반 단위(50만원) 경계, 설정 없으면 자동 「단위 차이」', () => {
+  // 인천 원자재 도구 값: 7월 1,480원 · 8월 1,690원(pdat)
+  const r = L.analyze(pdat, pset);
+  const book = { names: ['총괄현황'], sheets: { '총괄현황': sumAoa.slice(0, 4) } };
+  const rep9 = L.parseReportBook(book, { fileName: '8월재고분석(본사).xlsx', filePlant: '인천' });
+  const rc = L.reconcile(r, [rep9], L.checkSettings(pset), {});
+  assert.deepEqual([rc.alarms.length, rc.units.length, rc.unitsOk], [0, 0, 2]);
+  // 8월 보고서를 0.50169 → 501,690 − 1,690 = 500,000(경계, 같음) / 0.501691 → 500,001(알람)
+  const at = v => { const a = JSON.parse(JSON.stringify(sumAoa.slice(0, 4))); a[2][5] = v; a[3][5] = 0; return L.parseReportBook({ names: ['총괄현황'], sheets: { '총괄현황': a } }, { fileName: 'x', filePlant: '인천' }); };
+  assert.equal(L.reconcile(r, [at(0.50169)], L.checkSettings(pset), {}).alarms.length, 0);
+  const over = L.reconcile(r, [at(0.501691)], L.checkSettings(pset), {});
+  assert.deepEqual(over.alarms.map(a => [a.plant, a.kindLabel, a.label, a.month, a.report, a.tool, a.diff, a.note]),
+    [['인천', '원자재', '총괄', 8, 0.501691, 1690, -500001, '단위 설정 ÷1,000,000(백만원 단위) 적용 후에도 차이']]);
+  // 칸 단위를 비우면: 백만원이 자동으로 단위 차이(÷1,000,000)로 분류되어 알람이 아님
+  const auto = L.reconcile(r, [rep9], L.checkSettings(pset0), {});
+  assert.deepEqual(auto.alarms, []);
+  assert.deepEqual(auto.units.map(u => [u.label, u.month, u.factor, u.unitSource, u.suggest]), [['총괄', 7, 0.000001, 'auto', '총괄 인천 원자재 7월 금액=÷1000000'], ['총괄', 8, 0.000001, 'auto', '총괄 인천 원자재 8월 금액=÷1000000']]);
+  // 제안 설정 줄을 그대로 적으면 읽힘(총괄 칸 설정)
+  assert.deepEqual(L.parseReconUnits(auto.units[0].suggest).rules.map(x => [x.sheet, x.plant, x.kind, x.month, x.factor]), [['summary', '인천', 'raw', 7, 0.000001]]);
+});
+test('「* 금액=원」 은 총괄 칸에 적용되지 않음(총괄 줄이 없으면 총괄은 자동 찾기), 「총괄 금액=백만원」 은 원자재 시트에 적용되지 않음', () => {
+  const r = L.analyze(pdat, pset);
+  const book = { names: ['총괄현황'], sheets: { '총괄현황': sumAoa.slice(0, 4) } };
+  const rep9 = L.parseReportBook(book, { fileName: 'x', filePlant: '인천' });
+  const onlyWon = L.reconcile(r, [rep9], L.checkSettings({ ...pset, reconUnits: '* 금액=원' }), {});
+  assert.deepEqual([onlyWon.alarms.length, onlyWon.units.length, onlyWon.units[0].unitSource], [0, 2, 'auto']);
+  const onlySum = L.reconcile(r, [repX10], L.checkSettings({ ...pset, reconUnits: '총괄 금액=백만원' }), {});
+  assert.deepEqual([onlySum.alarms.length, onlySum.units.length, onlySum.units[0].unitSource], [0, 1, 'auto']);   // 원자재 ×10 은 자동 단위 차이
+});
+test('원 단위로 확정한 칸의 정확히 10배 = 알람 + 「자릿수 입력 오류 의심」(처음 값)', () => {
+  const r = L.analyze(pdat, pset);
+  const rc = L.reconcile(r, [repX10], L.checkSettings(pset), {});
+  assert.deepEqual(rc.alarms.map(a => [a.label, a.month, a.diff]), [['합계', 8, -15210]]);
+  assert.equal(rc.alarms[0].note, '단위가 확정된 칸(설정 「* 금액=원」)인데 보고서 = 도구 ×10 — 자릿수 입력 오류 의심');
+  assert.equal(rc.units.length, 0);
+});
+test('예전 설정: 칸 단위가 빈칸이면 새 처음 값으로(round9=set), 직접 적은 줄이 있으면 그대로(kept), 새 설정은 손대지 않음', () => {
+  const d = L.defaultSettings();
+  const a = L.migrateSettings({ curDate: '2026-08-31', longRawOp: 'gt', reconUnits: '' }, d);
+  assert.deepEqual([a.settings.reconUnits, a.round9], [d.reconUnits, 'set']);
+  const b = L.migrateSettings({ curDate: '2026-08-31', longRawOp: 'gt', reconUnits: '대구 반제품 7월 금액=×10' }, d);
+  assert.deepEqual([b.settings.reconUnits, b.round9], ['대구 반제품 7월 금액=×10', 'kept']);
+  const c = L.migrateSettings({ ...d, reconUnits: '' }, d);
+  assert.deepEqual([c.settings.reconUnits, c.round9], ['', '']);
+  assert.equal(L.migrateSettings({}, d).round9, '');
+});
+test('엑셀 총괄 시트 아래 대조 구역은 단위 안내와 함께 원 단위 차이를 그대로', () => {
+  const r = L.analyze({ ...pdat, report: [rep] }, pset);
+  const sh = L.buildSheets(r, pset, false, {})['총괄'];
+  assert.ok(sh.some(x => /도구 값·차이는 원/.test(String(x[0]))));
+  assert.ok(sh.some(x => x[0] === '인천' && x[2] === '합계' && x[7] === -960));
+});
+
+console.log('9차 답변 1 — 원자재 = 중국공장 판매(판매현황 거래처)');
+test('중국공장 거래처 목록: 한 줄·쉼표, 「*」 는 아무 글자, 「*」 없으면 전체가 같아야(대소문자·띄어쓰기 무시)', () => {
+  const r = L.parseChinaCustomers('가상 중국공장\n*(CN)*, C0012\n# 메모');
+  assert.deepEqual(r.map(x => x.text), ['가상 중국공장', '*(CN)*', 'C0012']);
+  assert.deepEqual(['가상중국공장', '가상 중국 공장', '가상중국공장2', '천진법인(cn)', 'c0012', 'C00123', ''].map(n => L.matchCustomer(r, n)),
+    [true, true, false, true, true, false, false]);
+  assert.equal(L.matchCustomer(L.parseChinaCustomers('a.b'), 'axb'), false);   // 점은 글자 그대로
+});
+// 가상 판매현황 한 파일: 원자재 R1 은 중국공장(2026-07-20)과 협력사(2026-08-25)에, 제품 P1 은 고객사에
+const cnSheet = [
+  ['회사명 : 가상 / 2026/07/01 ~ 2026/08/31'],
+  ['판매일자', '품목코드', '수량', '거래처명'],
+  ['2026/07/20 -1', 'R1', 5, '가상중국공장'],
+  ['2026/08/25 -2', 'R1', 7, '가상협력사'],
+  ['2026/08/10 -3', 'P1', 3, '가상고객사'],
+  ['2026/07/05 -4', 'R2', 2, '가상중국공장']
+];
+const cnFile = L.scanSales(cnSheet, { fileName: 'cn.xlsx' });
+const cnData = {
+  rawCur: [{ code: 'R1', qty: 10, amount: 100, agingFile: 3 }, { code: 'R2', qty: 4, amount: 40, agingFile: 9 }, { code: 'R3', qty: 1, amount: 10, agingFile: 2 }],
+  prodCur: [{ code: 'P1', group: '고객', qty: 3, amount: 30, agingFile: 5 }],
+  sales: [cnFile]
+};
+const cnSet = { ...L.defaultSettings(), curDate: '2026-08-31', groupMap: '' };
+test('판매현황 거래처 칸을 읽어 거래처별로 남김(거래처명 짝, 줄 수)', () => {
+  assert.equal(cnFile.mapping.customer, '거래처명');
+  assert.equal(cnFile.customerColumn, true);
+  assert.deepEqual(cnFile.custRows, { '가상중국공장': 2, '가상협력사': 1, '가상고객사': 1 });
+  assert.deepEqual(cnFile.byCust['가상중국공장'], { R1: { '2026-07': [5, 20] }, R2: { '2026-07': [2, 5] } });
+  assert.deepEqual(L.salesCustomers([cnFile], L.parseChinaCustomers('가상중국공장')).map(c => [c.name, c.rows, c.hint, c.matched]),
+    [['가상중국공장', 2, true, true], ['가상고객사', 1, false, false], ['가상협력사', 1, false, false]]);
+});
+test('처음 값(거래처 빈칸): 원자재는 판매현황을 쓰지 않음 — 재고잔량분석 칸', () => {
+  const r = L.analyze(cnData, cnSet);
+  assert.deepEqual([r.raw.salesMode, r.raw.useSales, r.raw.items[0].agingShown, r.raw.items[0].agingBasis, r.sales.china], ['', false, 3, '파일 경과 개월', null]);
+  assert.equal(r.product.salesMode, 'all');
+});
+test('중국공장 거래처를 적으면: 원자재는 중국공장 판매의 최근 판매일(협력사 8/25 는 안 씀), 판매 없는 품목은 재고잔량분석 칸', () => {
+  const r = L.analyze(cnData, { ...cnSet, chinaCustomers: '가상중국공장' });
+  const it = c => r.raw.items.find(i => i.code === c);
+  assert.equal(r.raw.salesMode, 'china');
+  assert.deepEqual([it('R1').lastOut, it('R1').agingShown, it('R1').agingBasis, it('R1').outQty], ['2026-07-20', 1, '출고일', 0]);   // 8월 출고수량: 중국공장 8월 판매 0
+  assert.deepEqual([it('R2').lastOut, it('R2').agingShown], ['2026-07-05', 1]);
+  assert.deepEqual([it('R3').lastOut, it('R3').agingShown, it('R3').agingBasis], ['', 2, '파일 경과 개월']);
+  assert.deepEqual(r.sales.china, { customers: ['가상중국공장'], rows: 2, codesAsOf: 2, filesNoCustomer: [] });
+  // 제품은 그대로 전체 판매
+  assert.deepEqual([r.product.salesMode, r.product.items[0].lastOut], ['all', '2026-08-10']);
+  assert.deepEqual(r.salesCoverage.raw, { stock: 3, withSale: 2, used: true, mode: 'china' });
+});
+test('끄기(off)·적용 대상 「모두」·거래처 칸 없는 예전 파일', () => {
+  const off = L.analyze(cnData, { ...cnSet, chinaCustomers: '가상중국공장', rawChinaSales: 'off' });
+  assert.equal(off.raw.salesMode, '');
+  const all = L.analyze(cnData, { ...cnSet, chinaCustomers: '가상중국공장', salesScope: 'all' });
+  assert.deepEqual([all.raw.salesMode, all.raw.items[0].lastOut], ['all', '2026-08-25']);   // 모두 = 협력사 판매까지
+  const oldFile = { fileName: 'old.xlsx', byCode: cnFile.byCode, minDate: cnFile.minDate, maxDate: cnFile.maxDate };
+  const old = L.analyze({ ...cnData, sales: [oldFile] }, { ...cnSet, chinaCustomers: '가상중국공장' });
+  assert.deepEqual([old.raw.salesMode, old.raw.items[0].lastOut, old.sales.china.filesNoCustomer], ['china', '', ['old.xlsx']]);
+});
+test('기준 시트에 중국공장 거래처·칸 단위가 적힘', () => {
+  const st = { ...cnSet, chinaCustomers: '가상중국공장' };
+  const r = L.analyze(cnData, st);
+  const sh = L.buildSheets(r, st, false, {})['기준'];
+  assert.ok(sh.some(x => x[0] === '중국공장 거래처(원자재 Aging)' && x[1] === '가상중국공장'));
+  assert.ok(sh.some(x => x[0] === '판매현황 적용 대상' && /원자재\(중국공장 거래처 판매만\)/.test(x[1])));
+  assert.ok(sh.some(x => x[0] === '보고서 칸 단위' && x[1] === '총괄 금액=백만원 / * 금액=원'));
 });
 
 console.log('판매현황 월 중간분 바꿔 넣기 (2026-09-30 답변 2)');
@@ -797,10 +967,26 @@ test('예시 파일이 시트·머리행·짝·공장 짐작으로 모두 읽히
   const wbs = Sample.workbooks();
   const reps = Sample.REPORT_FILES.map(fn => L.parseReportBook({ names: Object.keys(wbs[fn]), sheets: wbs[fn] }, { fileName: fn, filePlant: L.plantFromFileName(fn) }));
   const r3 = L.analyze({ ...out, report: reps }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV });
-  assert.deepEqual(r3.recon.alarms.map(a => [a.plant, a.kindLabel, a.month, a.field, a.diff]), [['인천', '원자재', 7, '금액', -1000]]);
+  // 대구 반제품 7월 금액은 일부러 10배 → 9차 처음 값(나머지 시트 = 원 단위 확정)에서는 단위 차이가 아니라 알람(자릿수 입력 오류 의심)
+  assert.deepEqual(r3.recon.alarms.map(a => [a.plant, a.kindLabel, a.label, a.month, a.field, a.diff]),
+    [['인천', '원자재', '합계', 7, '금액', -1000], ['대구', '반제품', '합계', 7, '금액', -6750000]]);
+  assert.ok(/자릿수 입력 오류 의심/.test(r3.recon.alarms[1].note));
   assert.deepEqual(r3.recon.unresolved, []);
-  // 대구 반제품 7월 금액은 일부러 10배 → 알람이 아니라 단위 차이 1건
-  assert.deepEqual(r3.recon.units.map(u => [u.plant, u.kindLabel, u.month, u.field, u.factor]), [['대구', '반제품', 7, '금액', 10]]);
+  assert.deepEqual(r3.recon.units, []);
+  // 총괄현황(백만원) 두 공장 × 자재·반제품·제품 × 7·8월 = 12칸, 단위를 맞추면 모두 같음
+  assert.equal(r3.recon.unitsOk, 12);
+  // 칸 단위 설정을 비우면 예전처럼: 대구 반제품 ×10 은 「단위 차이」, 총괄은 백만원(÷1,000,000)으로 자동 분류
+  const r3b = L.analyze({ ...out, report: reps }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV, reconUnits: '' });
+  assert.deepEqual(r3b.recon.alarms.map(a => [a.plant, a.kindLabel, a.month]), [['인천', '원자재', 7]]);
+  assert.deepEqual(r3b.recon.units.filter(u => !u.summary).map(u => [u.plant, u.kindLabel, u.month, u.factor]), [['대구', '반제품', 7, 10]]);
+  assert.ok(r3b.recon.units.filter(u => u.summary).every(u => u.factor === 0.000001 && u.unitSource === 'auto'));
+  // 판매현황 예시의 거래처 — 「예시중국공장(가상)」에 적은 H-1003 은 중국공장 거래처를 적었을 때만 원자재 Aging 에 씀
+  const cust = L.salesCustomers(sales, []);
+  assert.deepEqual(cust.filter(c => c.hint).map(c => c.name), ['예시중국공장(가상)']);
+  const r5 = L.analyze({ ...out, sales }, { ...L.defaultSettings(), curDate: Sample.CUR, prevDate: Sample.PREV, chinaCustomers: '예시중국공장(가상)' });
+  const h3 = r5.raw.items.find(i => i.code === 'H-1003');
+  assert.deepEqual([r5.raw.salesMode, h3.lastOut, h3.lastOutSource, h3.agingShown], ['china', '2026-07-08', '판매현황', 1]);
+  assert.equal(r2.raw.items.find(i => i.code === 'H-1003').lastOutSource, '');   // 설정 전: 원자재에 판매현황 안 씀
 });
 
 console.log(process.exitCode ? '\n실패 있음' : '\n전부 통과 (' + passed + '개)');

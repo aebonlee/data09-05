@@ -56,7 +56,9 @@ create table if not exists public.app_settings (
   sales_scope      text not null default 'prod',      -- 판매현황 최근 출고일 적용 대상: prod = 반제품·제품 / all = 원자재까지
   recon_tolerance  numeric not null default 1,        -- 보고서 대조 허용 차이(원)
   plant_alias      text not null default '',          -- 보고서 구역 이름 → 공장(한 줄에 「구역이름=대구」)
-  recon_units      text not null default '',          -- 보고서 칸 단위(한 줄에 「대구 반제품 7월 금액=×10」, 2026-09-30)
+  recon_units      text not null default E'총괄 금액=백만원\n* 금액=원',   -- 보고서 칸 단위(2026-09-30 오후 확정: 총괄현황 = 백만원, 나머지 시트 = 원)
+  raw_china_sales  text not null default 'on',        -- 원자재 Aging 을 중국공장 거래처 판매로(on/off, 2026-09-30 오후)
+  china_customers  text not null default '',          -- 중국공장으로 볼 판매현황 거래처명·코드(한 줄에 하나, 「*」 가능)
   over_enabled   boolean not null default false,     -- 과잉 구간 쓰기(기본 끔)
   no_out_policy  text not null default 'inbound'
                  check (no_out_policy in ('inbound', 'none')),
@@ -300,7 +302,22 @@ alter table public.app_settings add column if not exists aging_path      text   
 alter table public.app_settings add column if not exists sales_scope     text    not null default 'prod';
 alter table public.app_settings add column if not exists recon_tolerance numeric not null default 1;
 alter table public.app_settings add column if not exists plant_alias     text    not null default '';
-alter table public.app_settings add column if not exists recon_units     text    not null default '';   -- 2026-09-30 보고서 칸 단위
+alter table public.app_settings add column if not exists recon_units     text    not null default E'총괄 금액=백만원\n* 금액=원';   -- 2026-09-30 보고서 칸 단위
+-- 9차(2026-09-30 오후): 칸 단위 처음 값 확정 + 원자재 = 중국공장 판매. china_customers 칸이 처음 생길 때 한 번만,
+-- 칸 단위를 비워 둔 행에 새 처음 값을 넣습니다(직접 적은 줄은 그대로 — 앱의 migrateSettings round9 와 같은 규칙).
+do $r9$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'app_settings' and column_name = 'china_customers') then
+    alter table public.app_settings add column china_customers text not null default '';
+    update public.app_settings set recon_units = E'총괄 금액=백만원\n* 금액=원' where btrim(recon_units) = '';
+  end if;
+end;
+$r9$;
+alter table public.app_settings alter column recon_units set default E'총괄 금액=백만원\n* 금액=원';
+alter table public.app_settings add column if not exists raw_china_sales text    not null default 'on';
+alter table public.app_settings drop constraint if exists app_settings_round9_check;
+alter table public.app_settings add constraint app_settings_round9_check check (raw_china_sales in ('on', 'off'));
 alter table public.app_settings alter column aging_max_months set default 36;
 alter table public.app_settings drop constraint if exists app_settings_round3_check;
 alter table public.app_settings add constraint app_settings_round3_check check (

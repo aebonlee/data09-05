@@ -94,6 +94,8 @@
         // 「판매일자」: 2026-09-29 받은 판매현황(ERP 판매현황내역) 22개 파일의 출고일 칸 — 「주문일자」보다 먼저 잡히도록 「일자」 앞에 둡니다
         { key: 'date', label: '출고일(최근 출고일)', required: true, syn: ['최근출고일', '최종출고일', '마지막출고일', '판매일자', '출고일', '출고일자', '납품일자', '사용일', '불출일', '일자', '날짜', 'date'] },
         { key: 'qty', label: '출고수량', required: false, syn: ['출고수량', '판매수량', '사용수량', '불출수량', '수량', 'qty'] },
+        // 거래처(9차): 판매현황의 「거래처명」 — 중국공장 판매를 가려 원자재 Aging 에 씁니다(기준 설정 「중국공장 거래처」)
+        { key: 'customer', label: '거래처(있으면 — 중국공장 판매 구분)', required: false, syn: ['거래처명', '거래처', '거래처코드', '납품처', '판매처', '고객사', '고객명', 'customer'] },
         PLANT_FIELD
       ]
     },
@@ -134,6 +136,7 @@
     { id: 'price', def: 'price', label: '단가표 · 품목 기준정보' }
   ];
 
+  var RECON_UNITS_DEFAULT = '총괄 금액=백만원\n* 금액=원';
   // 기준값의 처음 값. 회사 기준을 받기 전 「예시 값」입니다(기획서 10장 4·9번).
   // Aging 은 2026-09-29 요청으로 「일」이 아니라 「개월」 단위입니다. 처음 값 3·6·12개월은
   // 예전 일 단위 예시 값 90·180·365일을 월로 환산한 것입니다(daysToMonths).
@@ -156,12 +159,21 @@
       // 원자재는 생산에 투입(자재 출고)되지 판매되지 않아, 판매현황에는 유상사급 판매분만 나옵니다. 실데이터 대조에서
       // 재고잔량분석 칸이 0개월인 원자재가 판매 기준으로는 1년 넘게로 잡히는 경우가 많아 처음 값은 반제품·제품만입니다(기획서 11.8).
       salesScope: 'prod',
+      // 원자재 = 중국공장 판매(2026-09-30 오후 답변 1): 「원자재 투입은 한국생산이 줄어 중국공장 판매로 봐도 무방, 생산투입현황은
+      // BOM 구성이 맞지 않아 신뢰성이 떨어짐」 → 자재 출고(생산 투입) 내역은 쓰지 않고, 판매현황 중 거래처가 중국공장인 줄의
+      // 최근 판매일로 원자재 Aging 을 셉니다. 판매현황에는 공장·국가 칸이 없고 「거래처명」만 있어, 어느 거래처가 중국공장인지
+      // 아래 chinaCustomers 에 적어야 켜집니다(처음 값 빈칸 = 꺼짐과 같음). salesScope 가 all 이면 원자재도 전체 판매를 씁니다.
+      rawChinaSales: 'on',  // on = 중국공장 거래처를 적어 두면 원자재에 그 판매만 씀(처음 값), off = 쓰지 않음
+      chinaCustomers: '',   // 중국공장으로 볼 거래처명·거래처코드 — 한 줄(또는 쉼표)에 하나, 「*」는 아무 글자
       reconTolerance: 1,    // 보고서 대조: 이 금액(원) 이하 차이는 알람 없음(수량은 0.5 — 보고서 수량이 정수로 표시돼 소수 수량 반올림 차이는 뺌)
       plantAlias: '',       // 보고서 구역 이름 → 공장 (한 줄에 「구역이름=대구」). 회사 고유 이름이라 처음 값은 비워 둡니다
       // 보고서 칸 단위(2026-09-30 답변 「단위가 다릅니다」): 보고서 값이 도구(원) 값과 단위가 다른 칸을 적습니다.
       // 한 줄에 「대구 반제품 7월 금액=×10」(보고서 = 도구 × 10) 또는 「인천 * 금액=천원」(보고서가 천원 단위).
       // 적지 않아도 정확히 10·100·1000…배(또는 그 역수) 차이는 「단위 차이」로 따로 보이고 알람에는 올리지 않습니다.
-      reconUnits: '',
+      // 2026-09-30 오후 답변 3: 「총괄현황 SHEET 은 백만원, 나머지 SHEET 는 원 단위」 → 처음 값으로 확정.
+      // 「총괄 …」 줄은 총괄(현황) 시트에만, 나머지 줄은 원자재·반제품·제품 시트에만 적용됩니다.
+      // 「* 금액=원」 으로 단위를 확정한 칸은 10배 차이를 자동으로 「단위 차이」로 돌리지 않고 알람(자릿수 입력 오류 의심)으로 올립니다.
+      reconUnits: RECON_UNITS_DEFAULT,
       overEnabled: '',      // 과잉 구간 쓰기(기본 끔). 'on' 이면 경과 개월이 overMonths 를 넘고 장기재고 미만인 품목을 「과잉」
       overMonths: 6,
       noOutPolicy: 'inbound', // 출고 이력 없는 품목: inbound=입고일로 대신, none=판정 보류
@@ -201,7 +213,14 @@
       round3 = true;
       if (saved.agingMaxMonths == null || Number(saved.agingMaxMonths) === 12) out.agingMaxMonths = defaults.agingMaxMonths;
     }
-    return { settings: out, migrated: migrated, round3: round3 };
+    // 9차(2026-09-30 오후): 보고서 칸 단위 처음 값이 빈칸 → 「총괄 금액=백만원 / * 금액=원」. 중국공장 칸(chinaCustomers)이 없는
+    // 예전 설정에서, 칸 단위를 비워 두었으면 새 처음 값을 넣고, 직접 적어 둔 줄이 있으면 그대로 두고 알립니다.
+    var round9 = '';
+    if (saved.chinaCustomers == null && Object.keys(saved).length) {
+      if (saved.reconUnits == null || String(saved.reconUnits).trim() === '') { out.reconUnits = defaults.reconUnits; round9 = 'set'; }
+      else round9 = 'kept';
+    }
+    return { settings: out, migrated: migrated, round3: round3, round9: round9 };
   }
 
   // ── 값 다듬기 ────────────────────────────────────────────────
@@ -703,26 +722,31 @@
       var eq = t.lastIndexOf('=');
       var f = eq > 0 ? parseUnitFactor(t.slice(eq + 1)) : null;
       if (eq <= 0 || f == null) { out.errors.push((i + 1) + '번째 줄은 「대구 반제품 7월 금액=×10」 또는 「인천 * 금액=천원」 형식이어야 합니다.'); return; }
-      var rule = { plant: '', kind: '', month: null, field: '', factor: f, line: t };
+      var rule = { sheet: '', plant: '', kind: '', month: null, field: '', factor: f, line: t };
       var bad = '';
       t.slice(0, eq).split(/[\s|,·]+/).forEach(function (w) {
         if (!w || w === '*' || w === '전체' || w === '모두') return;
         var mo = w.match(/^(\d{1,2})월$/);
         if (mo && +mo[1] >= 1 && +mo[1] <= 12) rule.month = +mo[1];
+        else if (SUMMARY_SHEET.test(w)) rule.sheet = 'summary';
+        else if (w === '자재') rule.kind = 'raw';
         else if (REPORT_KIND[w]) rule.kind = REPORT_KIND[w];
         else if (w === '금액' || w === '수량') rule.field = w;
         else if (isPlant(normalizePlant(w))) rule.plant = normalizePlant(w);
         else bad = bad || w;
       });
-      if (bad) { out.errors.push((i + 1) + '번째 줄의 「' + bad + '」를 알 수 없습니다(공장·원자재/반제품/제품·N월·금액/수량).'); return; }
+      if (bad) { out.errors.push((i + 1) + '번째 줄의 「' + bad + '」를 알 수 없습니다(총괄·공장·원자재/반제품/제품·N월·금액/수량).'); return; }
       out.rules.push(rule);
     });
     return out;
   }
-  // 칸에 맞는 단위 규칙 — 조건을 더 많이 적은 줄이 먼저, 같으면 뒤에 적은 줄
-  function unitRuleFor(rules, plant, kind, month, field) {
+  // 칸에 맞는 단위 규칙 — 조건을 더 많이 적은 줄이 먼저, 같으면 뒤에 적은 줄.
+  // sheet: 'summary' = 총괄(현황) 시트 칸 → 「총괄」을 적은 줄만, '' = 원자재·반제품·제품 시트 칸 → 「총괄」이 없는 줄만 적용합니다
+  // (9차 답변: 총괄은 백만원, 나머지는 원 — 「* 금액=원」 이 총괄 칸까지 덮지 않도록 두 묶음을 나눴습니다).
+  function unitRuleFor(rules, plant, kind, month, field, sheet) {
     var best = null, bestN = -1;
     (rules || []).forEach(function (r) {
+      if ((r.sheet || '') !== (sheet || '')) return;
       if ((r.plant && r.plant !== plant) || (r.kind && r.kind !== kind) || (r.month && r.month !== month) || (r.field && r.field !== field)) return;
       var n = (r.plant ? 1 : 0) + (r.kind ? 1 : 0) + (r.month ? 1 : 0) + (r.field ? 1 : 0);
       if (n >= bestN) { best = r; bestN = n; }
@@ -738,13 +762,19 @@
   }
   // 보고서 값이 도구 값의 정확히 10의 거듭제곱 배(×10 ~ ×1,000,000 또는 그 역수)인지 — 반올림 오차(보고서 단위의 절반)까지 허용
   var UNIT_FACTORS = [10, 100, 1000, 10000, 100000, 1000000, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001];
+  // 보고서 값 → 도구 단위(원·개). 배수가 1보다 작으면(천원·백만원) 역수를 곱합니다(0.5 ÷ 0.000001 같은 나눗셈 오차를 피함)
+  function unitToTool(report, f) { return f < 1 ? round(report * Math.round(1 / f), 6) : report / f; }
+  // 보고서 단위의 절반(반올림 오차 한도): 백만원 → 500,000원, 천원 → 500원, ×10 → 0.05
+  function halfUnit(f) { return f < 1 ? Math.round(1 / f) / 2 : 0.5 / f; }
   function detectUnitFactor(report, tool, tol) {
     if (report == null || tool == null || !report || !tool || (report > 0) !== (tool > 0)) return null;
+    // 여러 배수가 반 단위 안에 들면(값이 아주 작을 때) 바꾼 값이 도구 값에 가장 가까운 배수를 고릅니다
+    var best = null, bestD = Infinity;
     for (var i = 0; i < UNIT_FACTORS.length; i++) {
-      var f = UNIT_FACTORS[i];
-      if (Math.abs(report / f - tool) <= Math.max(tol, 0.5 / f) + 1e-9) return f;
+      var f = UNIT_FACTORS[i], d = Math.abs(unitToTool(report, f) - tool);
+      if (d <= Math.max(tol, halfUnit(f)) + 1e-6 && d < bestD) { best = f; bestD = d; }
     }
-    return null;
+    return best;
   }
   function checkSettings(s) {
     var errors = [];
@@ -781,6 +811,7 @@
       longRawOp: s.longRawOp === 'ge' ? 'ge' : 'gt', longProdOp: s.longProdOp === 'gt' ? 'gt' : 'ge',
       agingPath: s.agingPath === 'file' ? 'file' : 'out', salesScope: s.salesScope === 'all' ? 'all' : 'prod',
       reconTolerance: tol, plantAlias: alias.map, reconUnits: units.rules,
+      rawChinaSales: s.rawChinaSales === 'off' ? 'off' : 'on', chinaRules: parseChinaCustomers(s.chinaCustomers),
       overMonths: overOn ? over : null, topN: topN, turnoverMax: tm, causeTopN: ctn,
       groupMap: gm, groupOthers: s.groupOthers === 'keep' ? 'keep' : 'other',
       plantView: isPlant(pv) ? pv : '',
@@ -797,7 +828,11 @@
     var kind = ctx.kind, isRaw = kind === 'raw';
     var longM = isRaw ? ctx.longRaw : ctx.longProd, longOp = isRaw ? ctx.longRawOp : ctx.longProdOp;
     // 판매현황(출고) 최근 출고일을 이 종류에 쓰는지 — 설정 「판매현황 적용 대상」
-    var useSales = ctx.hasSales && (ctx.salesScope !== 'prod' || !isRaw);
+    //  반제품·제품: 전체 판매. 원자재: 적용 대상이 「모두」면 전체 판매, 아니면 중국공장 거래처를 적어 두었을 때 그 판매만(9차 답변 1)
+    var salesMode = !ctx.hasSales ? '' : (!isRaw || ctx.salesScope === 'all') ? 'all' : (ctx.china ? 'china' : '');
+    var useSales = !!salesMode;
+    var sLast = salesMode === 'china' ? ctx.china.last : ctx.lastSales, sQty = salesMode === 'china' ? ctx.china.qty : ctx.salesQty,
+      sQtyPrev = salesMode === 'china' ? ctx.china.qtyPrev : ctx.salesQtyPrev;
     var cur = aggregateStock(curRecs);
     var prev = aggregateStock(prevRecs);
     var codes = cur.order.slice();
@@ -810,7 +845,7 @@
       var prevAmt = amountOf(p, ctx.prevPrice[code], ctx.amountSource);
       var lastIn = ctx.lastIn[code] || '';
       // 최근 출고일 = 출고 이력 자리와 판매현황 중 늦은 날짜(둘 다 기준일 이전만)
-      var lastOutHist = ctx.lastOut[code] || '', lastSale = useSales ? (ctx.lastSales[code] || '') : '';
+      var lastOutHist = ctx.lastOut[code] || '', lastSale = useSales ? (sLast[code] || '') : '';
       var lastOut = laterDate(lastOutHist, lastSale);
       var lastOutSource = !lastOut ? '' : (lastSale && lastOut === lastSale ? '판매현황' : '출고 이력');
       // Aging — 경과 개월(monthsBetween). 일수는 참고용으로 함께 둡니다.
@@ -837,7 +872,7 @@
       // 당월 입고·출고 수량: 재고 파일에 칸이 있으면 그 값, 없으면 입·출고 이력(과 판매현황)에서 (전월 기준일, 당월 기준일] 합계
       var hasOutSrc = ctx.hasOutbound || useSales;
       var inQty = c && c.inQty != null ? c.inQty : (ctx.hasInbound ? ctx.inQty[code] || 0 : null);
-      var outQty = c && c.outQty != null ? c.outQty : (hasOutSrc ? (ctx.outQty[code] || 0) + (useSales ? ctx.salesQty[code] || 0 : 0) : null);
+      var outQty = c && c.outQty != null ? c.outQty : (hasOutSrc ? (ctx.outQty[code] || 0) + (useSales ? sQty[code] || 0 : 0) : null);
       var flowSource = (c && (c.inQty != null || c.outQty != null)) ? '재고 파일' : (ctx.hasInbound || hasOutSrc ? '입출고 이력' : '');
       if (inQty != null || outQty != null) hasFlow = true;
       var avg = (curQty + prevQty) / 2;
@@ -859,7 +894,7 @@
         amtRate: rate(prevAmt.value, curAmt.value),
         curAmtSource: c ? curAmt.source : '', prevAmtSource: p ? prevAmt.source : '',
         change: change,
-        lastIn: lastIn, lastOut: lastOut, lastOutSource: lastOutSource, agingIn: agingIn, agingOut: agingOut,
+        lastIn: lastIn, lastOut: lastOut, lastOutSource: lastOutSource, salesChina: salesMode === 'china' && lastOutSource === '판매현황', agingIn: agingIn, agingOut: agingOut,
         agingInDays: agingInDays, agingOutDays: agingOutDays, agingFile: agingFile, agingFileOpen: agingFileOpen, agingFileText: c ? c.agingFileText : '',
         agingShown: sh.m, agingShownOpen: sh.open, agingShownDays: sh.d, agingBasis: sh.basis,
         bucket: bucketOf(sh.m, ctx.agingMax, sh.open),
@@ -870,7 +905,7 @@
         deadConfirmed: !!(ctx.dead && ctx.dead[kind] && ctx.dead[kind][code]),
         inQty: inQty, outQty: outQty, flowSource: flowSource,
         inQtyPrev: ctx.hasInbound ? ctx.inQtyPrev[code] || 0 : null,
-        outQtyPrev: hasOutSrc ? (ctx.outQtyPrev[code] || 0) + (useSales ? ctx.salesQtyPrev[code] || 0 : 0) : null,
+        outQtyPrev: hasOutSrc ? (ctx.outQtyPrev[code] || 0) + (useSales ? sQtyPrev[code] || 0 : 0) : null,
         turnover: turnover == null ? null : round(turnover, 2)
       };
       decompose(it);
@@ -882,7 +917,7 @@
       buckets: bucketSummary(items, ctx.agingMax, longM, longOp, false),
       bucketsAlt: bucketSummary(items, ctx.agingMax, longM, longOp, true),
       fitness: fitnessSummary(items), overall: overallSummary(items),
-      longMonths: longM, longOp: longOp, longText: longLabel(longM, longOp), useSales: useSales,
+      longMonths: longM, longOp: longOp, longText: longLabel(longM, longOp), useSales: useSales, salesMode: salesMode,
       cause: causeSummary(items, ctx.causeTopN, order), hasFlow: hasFlow
     };
   }
@@ -1175,11 +1210,13 @@
   // 보고용 시트 구조(실데이터, 값 없이): 구역 제목 줄(「○○기준」) → 머리행(「재고현황(07월)」 「07월 재고현황」 「26년 07월 재고현황」
   // 처럼 달이 적힌 칸이 둘) → 아랫줄 「수량」「금액」 → 대분류(원자재) 또는 고객사(반제품·제품) 줄 → 「합계」 「총합계」.
   var REPORT_KIND = { '원자재': 'raw', '반제품': 'semi', '제품': 'product' };
+  var SUMMARY_SHEET = /^총괄(현황)?(시트|sheet)?$/i;
   var MONTH_HEAD = /(\d{1,2})\s*월\s*재고\s*현황|재고\s*현황\s*\(\s*(\d{1,2})\s*월/;
   function parseReportBook(book, opts) {
     opts = opts || {};
     var out = { fileName: opts.fileName || '', filePlant: opts.filePlant || '', sections: [] };
     (book.names || []).forEach(function (name) {
+      if (/^총괄/.test(String(name).replace(/\s+/g, ''))) { var sm = parseSummarySheet(book.sheets[name] || [], name); if (sm) out.sections.push(sm); return; }
       var kind = REPORT_KIND[String(name).replace(/\s+/g, '')];
       if (!kind) return;
       var aoa = book.sheets[name] || [];
@@ -1229,6 +1266,86 @@
     out.sections.forEach(function (x) { delete x.cols; delete x.labelCol; });
     return out;
   }
+  // 총괄(현황) 시트 — 9차(2026-09-30 오후) 답변 3 「총괄현황 SHEET 은 백만원」으로 대조 대상에 넣었습니다.
+  // 회사 총괄표 구조(값 없이, 11.3): 공장(합계·인천·대구) × 구분(자재·반제품·제품) × 정상/불용 줄, 달이 적힌 칸(월별 추이).
+  // 실제 칸 배치는 받지 못해 넓게 읽습니다:
+  //  · 달 머리행 = 「07월」「26년 07월」「2026.07」처럼 달이 적힌 칸이 둘 이상인 줄(증감·비교·차이 칸 제외). 새 머리행이 나오면 바꿔 읽음
+  //  · 달 칸 왼쪽의 글자 칸에서 공장(인천·본사·대구, 「합계」「인천+대구」= 합계) · 구분(자재·원자재/반제품/제품) · 정상/불용을 찾고,
+  //    빈칸이면 윗줄 값을 이어 씁니다(병합 셀). 숫자가 없는 줄에 공장 이름만 있으면 구역 제목으로 봅니다.
+  //  · (공장·구분)마다 달별 금액 = 정상 + 불용(구분 소계 줄이 따로 있으면 그 값). 「계」(구분 합계) 줄은 읽지 않습니다.
+  // 도구 쪽 값은 공장·구분의 재고금액 합계(정상+불용 = 전체)입니다 — 불용은 사람이 확정하는 값이라 정상/불용 나눔은 맞대지 않습니다.
+  // 숫자 칸(금액 14.8 등)은 달로 보지 않습니다. 「2026.07」은 네 자리 해만, 「26.07」은 끝에 「월」이 있을 때만 달입니다.
+  var SUM_MONTH = [/^(?:(?:\d{2}|\d{4})\s*년\s*)?(\d{1,2})\s*월(?:\s*말)?(?:\s*재고)?(?:\s*현황)?(?:\s*\(.*\))?$/, /^\d{4}\s*[.\/\-]\s*(\d{1,2})\s*(?:월)?$/, /^\d{2}\s*[.\/\-]\s*(\d{1,2})\s*월$/];
+  function summaryMonth(v) {
+    if (typeof v !== 'string') return null;
+    var t = v.trim();
+    if (!t || /증감|비교|차이|원인|대비/.test(t)) return null;
+    for (var i = 0; i < SUM_MONTH.length; i++) { var m = t.match(SUM_MONTH[i]); if (m && +m[1] >= 1 && +m[1] <= 12) return +m[1]; }
+    return null;
+  }
+  function summaryKind(t) {
+    t = String(t == null ? '' : t).replace(/\s+/g, '');
+    if (/^(원)?자재$/.test(t)) return 'raw';
+    if (/^반제품$/.test(t)) return 'semi';
+    if (/^(완)?제품$/.test(t)) return 'product';
+    return '';
+  }
+  function summaryPlant(t) {
+    t = String(t == null ? '' : t).replace(/\s+/g, '');
+    if (!t) return null;
+    if (/\+|전체|총계|^합계$|합계$/.test(t) && !/^(소계|계)$/.test(t)) {
+      var p0 = normalizePlant(t.replace(/합계$|기준$/, ''));
+      return /\+/.test(t) || !isPlant(p0) ? '합계' : p0;
+    }
+    var p = normalizePlant(t.replace(/기준$|공장$/, ''));
+    if (isExcludedPlant(p)) return '(제외)';   // 중국공장 구역 — 분석 대상이 아니라 맞대지 않습니다
+    return isPlant(p) ? p : null;
+  }
+  function parseSummarySheet(aoa, name) {
+    var sec = { sheet: name, kind: 'summary', name: '총괄', months: [], rows: [] };
+    var cols = null, plant = '', kind = '', acc = {}, order = [];
+    function cellsLeft(row) { var first = Math.min.apply(null, cols.map(function (c) { return c.col; })); return row.slice(0, first).map(function (v) { return String(v == null ? '' : v).trim(); }); }
+    function add(p, k, v, sub) {
+      var key = p + '|' + k;
+      var a = acc[key];
+      if (!a) { a = acc[key] = { plant: p, kindKey: k, status: {}, sub: null }; order.push(key); }
+      if (sub) { a.sub = v; return; }
+      cols.forEach(function (c) { if (v[c.month] != null) a.status[c.month] = round((a.status[c.month] || 0) + v[c.month], 6); });
+    }
+    for (var r = 0; r < aoa.length; r++) {
+      var row = (aoa[r] || []).map(function (v) { return v == null ? '' : v; });
+      var ms = [];
+      row.forEach(function (v, c) { var mo = summaryMonth(v); if (mo != null && !ms.some(function (x) { return x.month === mo; })) ms.push({ month: mo, col: c }); });
+      if (ms.length >= 2) { cols = ms; ms.forEach(function (x) { if (sec.months.indexOf(x.month) < 0) sec.months.push(x.month); }); continue; }
+      if (!cols) continue;
+      var left = cellsLeft(row);
+      var vals = {}, any = false;
+      cols.forEach(function (c) { var a = toNumber(row[c.col]); vals[c.month] = a == null || isNaN(a) ? null : a; if (vals[c.month] != null) any = true; });
+      var kHere = '', status = '', pHere = null, isTotal = false;
+      left.forEach(function (t) {
+        var k = summaryKind(t); if (k) { kHere = k; return; }
+        var z = t.replace(/\s+/g, '');
+        if (z === '정상' || z === '불용') { status = z; return; }
+        if (/^(소계|계)$/.test(z)) { isTotal = true; return; }
+        var p = summaryPlant(t); if (p) pHere = p;
+      });
+      if (!any) { if (pHere && !kHere && !status) { plant = pHere; kind = ''; } continue; }
+      if (!kHere && !status) continue;   // 「계」·메모 줄 등
+      if (pHere && (kHere || status)) { if (pHere !== plant) kind = ''; plant = pHere; }
+      if (kHere) kind = kHere;
+      if (!kind || isTotal) continue;
+      add(plant, kind, vals, !status);
+    }
+    order.forEach(function (key) {
+      var a = acc[key], v = {};
+      sec.months.forEach(function (m) {
+        var amt = a.sub && a.sub[m] != null ? a.sub[m] : (a.status[m] != null ? a.status[m] : null);
+        v[m] = { qty: null, amt: amt == null ? null : round(amt, 6) };
+      });
+      sec.rows.push({ label: '총괄 ' + ({ raw: '자재', semi: '반제품', product: '제품' })[a.kindKey], plant: a.plant, kindKey: a.kindKey, total: true, v: v });
+    });
+    return sec.rows.length ? sec : null;
+  }
   // 구역 이름 → 공장: 공장 별칭(설정) → 이름에 인천·본사·대구 → 한 시트에 구역이 하나뿐이면 파일의 공장
   function resolveSectionPlant(sec, file, alias) {
     var key = normHeader(sec.name);
@@ -1244,14 +1361,75 @@
   //  대분류·고객사 줄의 차이 = 참고(대분류 묶음·고객사 표기가 달라 생길 수 있어 알람으로 올리지 않음)
   // ack: 사람이 「확인함」으로 표시한 차이 { key: true } — 알람에서 빼고 「확인함」으로 남깁니다
   function reconcile(res, files, s, ack) {
-    var out = { hasReport: !!(files && files.length), compared: 0, alarms: [], acked: [], infos: [], units: [], unresolved: [], tolerance: s.reconTolerance };
+    var out = { hasReport: !!(files && files.length), compared: 0, alarms: [], acked: [], infos: [], units: [], unitsOk: 0, unresolved: [], tolerance: s.reconTolerance };
     if (!out.hasReport) return out;
     var curM = s.cur.getMonth() + 1, prevM = s.prev.getMonth() + 1;
     var seen = {};
     var byPlant = {};
     res.plants.rows.forEach(function (r) { byPlant[r.plant] = r.detail; });
+    byPlant['합계'] = res.plants.total.detail;
+    // 단위 규칙을 적용해 item 을 채웁니다. 돌려주는 값: false = 차이 없음(또는 단위 설정으로 같음 — 이미 units 에 넣음), true = 계속 판정
+    //  · 설정 배수 ≠ 1 : 보고서 값 ÷ 배수 로 바꿔 비교. 같으면 「단위 차이(설정)」, 다르면 알람
+    //  · 설정 배수 = 1 (「원」으로 확정): 자동 찾기를 하지 않고 알람. 정확히 10배 등이면 「자릿수 입력 오류 의심」을 덧붙입니다
+    //  · 설정 없음 : 정확히 10·100·1000…배면 unitSource='auto'(단위 차이 — 알람 아님)
+    function applyUnit(item, rule, rvv, tv, tol, where) {
+      if (rule && rule.factor !== 1) {
+        // 백만원(배수 0.000001)처럼 1보다 작은 배수는 역수(1,000,000)를 곱해 바꿉니다 — 나눗셈 부동소수 오차로 경계(반 단위)가 흔들리지 않게
+        var conv = unitToTool(rvv, rule.factor);
+        item.factor = rule.factor; item.reportConv = round(conv, 2); item.diff = round(tv - round(conv, 2), 2);
+        if (Math.abs(item.diff) <= Math.max(tol, halfUnit(rule.factor)) + 1e-6) {
+          item.unitSource = 'setting'; item.note = '단위 설정 ' + factorLabel(rule.factor) + ' 적용 — 단위를 맞추면 같음';
+          // 대분류·고객사 줄과 총괄 칸(시트 전체가 백만원이라 칸마다 적으면 목록만 길어짐)은 맞으면 따로 적지 않고 「단위 맞춰 같음」 수만 셉니다
+          if (item.total && !item.summary) out.units.push(item); else if (item.summary) out.unitsOk++;
+          return false;
+        }
+        item.note = '단위 설정 ' + factorLabel(rule.factor) + ' 적용 후에도 차이';
+        return true;
+      }
+      if (Math.abs(item.diff) <= tol) return false;
+      var uf = detectUnitFactor(rvv, tv, tol);
+      if (!uf) return true;
+      if (rule) { item.note = '단위가 확정된 칸(설정 「' + rule.line + '」)인데 보고서 = 도구 ' + factorLabel(uf) + ' — 자릿수 입력 오류 의심'; return true; }
+      item.factor = uf; item.unitSource = 'auto'; item.reportConv = round(unitToTool(rvv, uf), 2);
+      item.suggest = where + '=' + (uf >= 1 ? '×' + uf : '÷' + round(1 / uf, 6));
+      item.note = '단위 차이(보고서 = 도구 ' + factorLabel(uf) + ')';
+      return true;
+    }
+    // 총괄(현황) 시트: (공장·구분)별 달 금액 ↔ 도구의 그 공장·구분 재고금액 합계. 공장을 못 찾으면 파일의 공장(파일 이름)으로
+    function reconcileSummary(sec, f) {
+      sec.rows.forEach(function (row) {
+        var plant = row.plant;
+        if (plant === '(제외)') return;
+        if (!plant) {
+          if (isPlant(f.filePlant)) plant = f.filePlant;
+          else { var u = f.fileName + ' 「' + sec.sheet + '」 (공장 이름 없음)'; if (out.unresolved.indexOf(u) < 0) out.unresolved.push(u); return; }
+        } else if (s.plantAlias && s.plantAlias[normHeader(plant)]) plant = s.plantAlias[normHeader(plant)];
+        var det = byPlant[plant];
+        if (!det) return;
+        var g = det[row.kindKey].groups.total;
+        sec.months.forEach(function (m) {
+          var period = m === curM ? 'cur' : m === prevM ? 'prev' : null;
+          var rvv = (row.v[m] || {}).amt;
+          if (!period || rvv == null) return;
+          var key = [toDateStr(s.cur), plant, 'summary', row.kindKey, m, '금액'].join('|');
+          if (seen[key]) return;
+          seen[key] = true;
+          var tv = g[period + 'Amt'];
+          var item = { key: key, plant: plant, kind: row.kindKey, kindLabel: KIND_LABEL[row.kindKey], label: '총괄', total: true, summary: true,
+            period: period === 'cur' ? '당월' : '전월', month: m, field: '금액', report: rvv, tool: tv == null ? null : round(tv, 2),
+            diff: tv == null ? null : round(tv - rvv, 2), file: f.fileName, sheet: sec.sheet };
+          out.compared++;
+          if (tv == null) return;
+          var rule = unitRuleFor(s.reconUnits, plant === '합계' ? '' : plant, row.kindKey, m, '금액', 'summary');
+          if (!applyUnit(item, rule, rvv, tv, out.tolerance, '총괄 ' + (plant === '합계' ? '' : plant + ' ') + KIND_LABEL[row.kindKey] + ' ' + m + '월 금액')) return;
+          if (item.unitSource === 'auto') { out.units.push(item); return; }
+          if (ack[key]) { item.acked = true; out.acked.push(item); } else out.alarms.push(item);
+        });
+      });
+    }
     files.forEach(function (f) {
       f.sections.forEach(function (sec) {
+        if (sec.kind === 'summary') { reconcileSummary(sec, f); return; }
         var plant = resolveSectionPlant(sec, f, s.plantAlias);
         if (!plant) { var u = f.fileName + ' 「' + sec.sheet + '」 ' + (sec.name || '(구역 이름 없음)'); if (out.unresolved.indexOf(u) < 0) out.unresolved.push(u); return; }
         var det = byPlant[plant];
@@ -1279,28 +1457,9 @@
               out.compared++;
               if (tv == null) { item.note = '도구에 없는 ' + (sec.kind === 'raw' ? '대분류' : '고객사'); out.infos.push(item); return; }
               // 보고서 칸 단위(설정): 보고서 값 ÷ 배수 = 도구 단위(원·개)로 바꿔 비교. 반올림 오차는 보고서 단위의 절반까지
-              var rule = unitRuleFor(s.reconUnits, plant, sec.kind, m, fd[0]);
-              if (rule && rule.factor !== 1) {
-                var conv = rv[fd[1]] / rule.factor;
-                item.factor = rule.factor; item.reportConv = round(conv, 2); item.diff = round(tv - conv, 2);
-                if (Math.abs(item.diff) <= Math.max(fd[2], 0.5 / rule.factor)) {
-                  item.unitSource = 'setting'; item.note = '단위 설정 ' + factorLabel(rule.factor) + ' 적용 — 단위를 맞추면 같음';
-                  if (row.total) out.units.push(item);   // 대분류·고객사 줄은 맞으면 따로 적지 않습니다
-                  return;
-                }
-                item.note = '단위 설정 ' + factorLabel(rule.factor) + ' 적용 후에도 차이';
-              } else if (Math.abs(item.diff) <= fd[2]) return;
-              else if (!rule) {
-                // 설정이 없어도 정확히 10·100·1000…배 차이면 「단위 차이」(오류 알람이 아님)
-                var uf = detectUnitFactor(rv[fd[1]], tv, fd[2]);
-                if (uf) {
-                  item.factor = uf; item.unitSource = 'auto'; item.reportConv = round(rv[fd[1]] / uf, 2);
-                  item.suggest = plant + ' ' + KIND_LABEL[sec.kind] + ' ' + m + '월 ' + fd[0] + '=' + (uf >= 1 ? '×' + uf : '÷' + round(1 / uf, 6));
-                  item.note = '단위 차이(보고서 = 도구 ' + factorLabel(uf) + ')';
-                  if (row.total) { out.units.push(item); return; }
-                  out.infos.push(item); return;
-                }
-              }
+              var rule = unitRuleFor(s.reconUnits, plant, sec.kind, m, fd[0], '');
+              if (!applyUnit(item, rule, rv[fd[1]], tv, fd[2], plant + ' ' + KIND_LABEL[sec.kind] + ' ' + m + '월 ' + fd[0])) return;
+              if (item.unitSource === 'auto') { if (row.total) out.units.push(item); else out.infos.push(item); return; }
               if (!row.total) { out.infos.push(item); return; }
               if (ack[key]) { item.acked = true; out.acked.push(item); } else out.alarms.push(item);
             });
@@ -1321,7 +1480,8 @@
   function analyzeFiltered(data, s) {
     var prices = data.price || [];
     var prevPrev = prevMonthEnd(s.prev);
-    var sales = salesIndex(data.sales || [], s.cur, s.prev, prevPrev);
+    var chinaOn = s.rawChinaSales === 'on' && s.chinaRules.length > 0;
+    var sales = salesIndex(data.sales || [], s.cur, s.prev, prevPrev, chinaOn ? s.chinaRules : null);
     var ctx = {
       cur: s.cur, prev: s.prev, agingMax: s.agingMax, longRaw: s.longRaw, longProd: s.longProd, longRawOp: s.longRawOp, longProdOp: s.longProdOp,
       overMonths: s.overMonths, dead: s.dead, agingPath: s.agingPath, salesScope: s.salesScope,
@@ -1332,7 +1492,8 @@
       hasInbound: !!(data.inbound && data.inbound.length), hasOutbound: !!(data.outbound && data.outbound.length),
       inQty: sumQtyByCode(data.inbound, s.prev, s.cur), outQty: sumQtyByCode(data.outbound, s.prev, s.cur),
       inQtyPrev: sumQtyByCode(data.inbound, prevPrev, s.prev), outQtyPrev: sumQtyByCode(data.outbound, prevPrev, s.prev),
-      hasSales: sales.fileCount > 0, lastSales: sales.last, salesQty: sales.qty, salesQtyPrev: sales.qtyPrev
+      hasSales: sales.fileCount > 0, lastSales: sales.last, salesQty: sales.qty, salesQtyPrev: sales.qtyPrev,
+      china: sales.china || null
     };
     ctx.kind = 'raw';
     var raw = analyzeKind(data.rawCur, data.rawPrev, ctx);
@@ -1347,7 +1508,8 @@
       curDate: toDateStr(s.cur), prevDate: toDateStr(s.prev), agingMax: s.agingMax, longRaw: s.longRaw, longProd: s.longProd,
       longRawOp: s.longRawOp, longProdOp: s.longProdOp, agingPath: s.agingPath,
       hasHistory: { inbound: ctx.hasInbound, outbound: ctx.hasOutbound, sales: ctx.hasSales, price: !!prices.length },
-      sales: { fileCount: sales.fileCount, codes: sales.codeCount, codesAsOf: Object.keys(sales.last).length, minDate: sales.minDate, maxDate: sales.maxDate },
+      sales: { fileCount: sales.fileCount, codes: sales.codeCount, codesAsOf: Object.keys(sales.last).length, minDate: sales.minDate, maxDate: sales.maxDate,
+        china: sales.china ? { customers: sales.china.customers, rows: sales.china.rows, codesAsOf: Object.keys(sales.china.last).length, filesNoCustomer: sales.china.filesNoCustomer } : null },
       raw: raw, semi: semi, product: prod, targets: targets, unmatched: unmatched
     };
   }
@@ -1413,10 +1575,13 @@
     var headers = tableToRows([head[hr - 1] || []], 1).headers;
     var mapping = guessMapping(headers.map(function (h) { return /^\(빈 머리/.test(h) ? '' : h; }), 'outbound', opts.saved);
     var idx = {};
-    ['code', 'date', 'qty', 'plant'].forEach(function (k) { idx[k] = mapping[k] ? headers.indexOf(mapping[k]) : -1; });
+    ['code', 'date', 'qty', 'plant', 'customer'].forEach(function (k) { idx[k] = mapping[k] ? headers.indexOf(mapping[k]) : -1; });
     var out = {
       fileName: opts.fileName || '', sheetName: opts.sheetName || '', headerRow: hr, headers: headers, mapping: mapping,
       missing: missingRequired(mapping, 'outbound'), plantColumn: idx.plant >= 0,
+      // 거래처별 요약(9차): { 거래처: { 품목: { 'YYYY-MM': [수량 합, 마지막 일] } } } · 거래처별 줄 수. 거래처 칸이 없으면 비어 있습니다.
+      // 중국공장 거래처 설정을 나중에 바꿔도 파일을 다시 올리지 않도록 모든 거래처를 남깁니다(저장 크기는 byCode 와 비슷하게 늘어남).
+      customerColumn: idx.customer >= 0, byCust: {}, custRows: {},
       rowCount: 0, used: 0, skipped: {}, minDate: '', maxDate: '', stampDate: '', byCode: {}, codeCount: 0
     };
     var t = rangeFromTitle(head);
@@ -1448,6 +1613,15 @@
       var cell = e[mk] || (e[mk] = [0, 0]);
       cell[0] = round(cell[0] + q, 4);
       if (cell[1] < d.getDate()) cell[1] = d.getDate();
+      if (idx.customer >= 0) {
+        var cu = String(cellValue(row[idx.customer]) == null ? '' : cellValue(row[idx.customer])).trim() || '(거래처 빈칸)';
+        out.custRows[cu] = (out.custRows[cu] || 0) + 1;
+        var ce = (out.byCust[cu] || (out.byCust[cu] = {}));
+        var cc = ce[code] || (ce[code] = {});
+        var ccell = cc[mk] || (cc[mk] = [0, 0]);
+        ccell[0] = round(ccell[0] + q, 4);
+        if (ccell[1] < d.getDate()) ccell[1] = d.getDate();
+      }
       if (!out.minDate || ds < out.minDate) out.minDate = ds;
       if (ds > out.maxDate) out.maxDate = ds;
       out.used++;
@@ -1495,33 +1669,74 @@
   }
   // 여러 파일을 합쳐 품목별 최근 출고일(기준일 이전) · 기간 출고수량.
   // 기간 수량은 달 단위로 모아 두었으므로 월말 기준일을 전제로 「그 달 말일이 (from, to] 안인 달」을 더합니다.
-  function salesIndex(files, asOf, prev, prevPrev) {
+  // chinaRules(9차): 중국공장 거래처 규칙(parseChinaCustomers) — 주면 그 거래처 줄만 모은 out.china { last, qty, qtyPrev, customers, rows } 도 만듭니다.
+  function salesIndex(files, asOf, prev, prevPrev, chinaRules) {
     var out = { fileCount: (files || []).length, last: {}, lastAny: {}, qty: {}, qtyPrev: {}, codeCount: 0, minDate: '', maxDate: '' };
     var asOfStr = asOf ? toDateStr(asOf) : '';
+    function fold(dst, byCode, trackAny) {
+      Object.keys(byCode || {}).forEach(function (code) {
+        var mm = byCode[code];
+        Object.keys(mm).forEach(function (k) {
+          var q = mm[k][0], d = typeof mm[k][1] === 'number' ? k + '-' + pad(mm[k][1]) : mm[k][1];
+          if (trackAny && (!dst.lastAny[code] || dst.lastAny[code] < d)) dst.lastAny[code] = d;
+          if ((!asOfStr || d <= asOfStr) && (!dst.last[code] || dst.last[code] < d)) dst.last[code] = d;
+          var me = monthEndOfKey(k);
+          if (prev && asOf && me > prev && me <= asOf) dst.qty[code] = round((dst.qty[code] || 0) + q, 4);
+          if (prevPrev && prev && me > prevPrev && me <= prev) dst.qtyPrev[code] = round((dst.qtyPrev[code] || 0) + q, 4);
+        });
+      });
+    }
+    var cn = chinaRules && chinaRules.length ? { last: {}, qty: {}, qtyPrev: {}, customers: [], rows: 0, filesNoCustomer: [] } : null;
     (files || []).forEach(function (f) {
       if (f.minDate && (!out.minDate || f.minDate < out.minDate)) out.minDate = f.minDate;
       if (f.maxDate && f.maxDate > out.maxDate) out.maxDate = f.maxDate;
-      Object.keys(f.byCode || {}).forEach(function (code) {
-        var mm = f.byCode[code];
-        Object.keys(mm).forEach(function (k) {
-          var q = mm[k][0], d = typeof mm[k][1] === 'number' ? k + '-' + pad(mm[k][1]) : mm[k][1];
-          if (!out.lastAny[code] || out.lastAny[code] < d) out.lastAny[code] = d;
-          if ((!asOfStr || d <= asOfStr) && (!out.last[code] || out.last[code] < d)) out.last[code] = d;
-          var me = monthEndOfKey(k);
-          if (prev && asOf && me > prev && me <= asOf) out.qty[code] = round((out.qty[code] || 0) + q, 4);
-          if (prevPrev && prev && me > prevPrev && me <= prev) out.qtyPrev[code] = round((out.qtyPrev[code] || 0) + q, 4);
-        });
+      fold(out, f.byCode, true);
+      if (!cn) return;
+      if (!f.customerColumn) { cn.filesNoCustomer.push(f.fileName); return; }
+      Object.keys(f.byCust || {}).forEach(function (cu) {
+        if (!matchCustomer(chinaRules, cu)) return;
+        if (cn.customers.indexOf(cu) < 0) cn.customers.push(cu);
+        cn.rows += (f.custRows || {})[cu] || 0;
+        fold(cn, f.byCust[cu], false);
       });
     });
     out.codeCount = Object.keys(out.lastAny).length;
+    if (cn) { cn.customers.sort(); out.china = cn; }
     return out;
+  }
+  // 중국공장 거래처 목록 읽기: 한 줄(또는 쉼표)에 거래처명·거래처코드 하나. 「*」는 아무 글자(예: 「*중국*」). 대소문자·띄어쓰기 무시.
+  // 「*」가 없으면 거래처 칸 값 전체가 같아야 합니다(「중국」 한 낱말이 다른 거래처까지 잡지 않게).
+  function parseChinaCustomers(text) {
+    var out = [];
+    String(text == null ? '' : text).split(/\r?\n|,/).forEach(function (line) {
+      var t = line.trim();
+      if (!t || t.charAt(0) === '#') return;
+      var norm = t.replace(/\s+/g, '').toLowerCase();
+      var re = new RegExp('^' + norm.split('*').map(function (x) { return x.replace(/[.+?^${}()|[\]\\]/g, '\\$&'); }).join('.*') + '$');
+      out.push({ text: t, re: re });
+    });
+    return out;
+  }
+  function matchCustomer(rules, name) {
+    var n = String(name == null ? '' : name).replace(/\s+/g, '').toLowerCase();
+    if (!n) return false;
+    for (var i = 0; i < (rules || []).length; i++) if (rules[i].re.test(n)) return true;
+    return false;
+  }
+  // 판매현황의 거래처 목록(줄 수 많은 순) + 중국공장 후보(이름에 중국·china·CN·中国 등이 든 거래처) — 설정 화면에서 골라 적도록 보여 줍니다
+  var CHINA_HINT = /중국|china|中国|中國|天津|\bcn\b|\(cn\)|청도|칭다오|천진|톈진|웨이하이|연태|옌타이|쑤저우|상하이|심양|선양|대련|다롄/i;
+  function salesCustomers(files, chinaRules) {
+    var map = {};
+    (files || []).forEach(function (f) { Object.keys(f.custRows || {}).forEach(function (cu) { map[cu] = (map[cu] || 0) + f.custRows[cu]; }); });
+    return Object.keys(map).map(function (cu) { return { name: cu, rows: map[cu], hint: CHINA_HINT.test(cu), matched: matchCustomer(chinaRules, cu) }; })
+      .sort(function (a, b) { return b.rows - a.rows || (a.name < b.name ? -1 : 1); });
   }
   // 재고 품목 중 최근 출고일(판매현황)을 찾은 품목 수 — 종류별(당월 재고가 있는 품목)
   function salesCoverage(res) {
     var out = {};
     KINDS.forEach(function (k) {
       var items = res[k].items.filter(function (it) { return it.curQty > 0; });
-      out[k] = { stock: items.length, withSale: items.filter(function (it) { return it.lastOutSource === '판매현황'; }).length, used: res[k].useSales };
+      out[k] = { stock: items.length, withSale: items.filter(function (it) { return it.lastOutSource === '판매현황'; }).length, used: res[k].useSales, mode: res[k].salesMode };
     });
     return out;
   }
@@ -1667,7 +1882,10 @@
       ['Aging 표시', '개월별 분포 0~' + res.agingMax + '개월, 그 위는 「' + overLabel(res.agingMax) + '」 한 칸. 파일의 「12 개월초과」처럼 정확한 개월을 모르는 값은 「12개월 초과(개월 미상)」 칸'],
       ['장기재고 기준(원자재)', longLabel(res.longRaw, res.longRawOp)], ['장기재고 기준(반제품·제품)', longLabel(res.longProd, res.longProdOp)],
       ['Aging 경로', res.agingPath === 'file' ? '재고잔량분석 칸 → 최근 출고일 → (설정 시) 최근 입고일' : '최근 출고일(판매현황·출고 이력) → 재고잔량분석 칸 → (설정 시) 최근 입고일'],
-      ['판매현황 적용 대상', settings.salesScope === 'all' ? '원자재·반제품·제품' : '반제품·제품만(원자재는 재고잔량분석 칸)'],
+      ['판매현황 적용 대상', settings.salesScope === 'all' ? '원자재·반제품·제품(전체 판매)' : '반제품·제품(전체 판매)' +
+        (res.raw && res.raw.salesMode === 'china' ? ' + 원자재(중국공장 거래처 판매만)' : '(원자재는 재고잔량분석 칸' + (settings.rawChinaSales !== 'off' && !String(settings.chinaCustomers || '').trim() ? ' — 중국공장 거래처를 적으면 그 판매로 계산' : '') + ')')],
+      ['중국공장 거래처(원자재 Aging)', settings.rawChinaSales === 'off' ? '쓰지 않음' : (String(settings.chinaCustomers || '').split(/\r?\n|,/).map(function (x) { return x.trim(); }).filter(Boolean).join(' / ') || '(비어 있음 — 꺼짐과 같음)')],
+      ['보고서 칸 단위', String(settings.reconUnits || '').split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean).join(' / ') || '(없음 — 10배 등 차이는 자동으로 「단위 차이」)'],
       ['보고서 대조 허용 차이', '금액 ' + (res.recon ? res.recon.tolerance : settings.reconTolerance) + '원 이하, 수량 0.5 이하는 알람 없음'],
       ['과잉 구간', settings.overEnabled === 'on' ? settings.overMonths + '개월 초과 ~ 장기재고 미만' : '쓰지 않음'],
       ['불용', '관련부서 확정 후 품목별 「불용 확정」 체크(도구가 판정하지 않음)'],
@@ -1703,8 +1921,11 @@
   var ALARM_HEAD = ['공장', '구분', '줄', '달', '항목', '보고서 값', '도구 값', '차이(도구 − 보고서)', '보고서 파일', '상태'];
   function summarySheet(res) {
     var t = res.plants.total.detail;
-    var head = ['공장', '구분', '항목', yymmOf(res.prevDate), yymmOf(res.curDate), '증감', '비고'];
-    var rows = [['단위: 원 · 기준일 ' + res.curDate + ' · 정상/불용 2단계(불용 = 「불용 확정」 품목)']];
+    // 9차(2026-09-30 오후) 답변 3: 회사 총괄현황 시트는 백만원 단위 → 금액을 백만원(소수 첫째 자리)으로 적습니다. 원 단위 값은 「공장별_요약」 시트.
+    // 아래 「대조 차이 알람」 구역은 비교한 값 그대로(보고서 값은 보고서 단위, 도구 값·차이는 원)입니다.
+    var M = function (v) { return round((v || 0) / 1000000, 1); };
+    var head = ['공장', '구분', '항목', yymmOf(res.prevDate) + ' (백만원)', yymmOf(res.curDate) + ' (백만원)', '증감 (백만원)', '비고'];
+    var rows = [['단위: 백만원(소수 첫째 자리 반올림 — 원 단위 금액은 「공장별_요약」 시트) · 기준일 ' + res.curDate + ' · 정상/불용 2단계(불용 = 「불용 확정」 품목)']];
     rows.push(head);
     var blocks = [{ label: '합계', det: t }].concat(res.plants.rows.filter(function (r) { return r.has; }).map(function (r) { return { label: plantLabel(r.plant), det: r.detail }; }));
     blocks.forEach(function (b) {
@@ -1713,15 +1934,15 @@
         var kd = b.det[k[1]];
         kd.overall.forEach(function (o, oi) {
           sumPrev += o.prevAmount; sumCur += o.amount;
-          var note = oi === 0 && kd.overall[0].longAmount + kd.overall[1].longAmount ? '(참고) 장기재고(Aging ' + kd.longText + ') ' + round(kd.overall[0].longAmount + kd.overall[1].longAmount, 0) + '원' : '';
-          rows.push([ki === 0 && oi === 0 ? b.label : '', oi === 0 ? k[0] : '', oi === 0 ? '정상' : '불용', o.prevAmount, o.amount, round(o.amount - o.prevAmount, 2), note]);
+          var note = oi === 0 && kd.overall[0].longAmount + kd.overall[1].longAmount ? '(참고) 장기재고(Aging ' + kd.longText + ') ' + M(kd.overall[0].longAmount + kd.overall[1].longAmount) + '백만원' : '';
+          rows.push([ki === 0 && oi === 0 ? b.label : '', oi === 0 ? k[0] : '', oi === 0 ? '정상' : '불용', M(o.prevAmount), M(o.amount), M(o.amount - o.prevAmount), note]);
         });
       });
-      rows.push(['', '계', '', round(sumPrev, 2), round(sumCur, 2), round(sumCur - sumPrev, 2), '']);
+      rows.push(['', '계', '', M(sumPrev), M(sumCur), M(sumCur - sumPrev), '']);
     });
     rows.push([]);
     var rc = res.recon || { hasReport: false, alarms: [], acked: [], infos: [] };
-    rows.push(['대조 차이 알람 — 회사 보고서의 합계 줄과 도구 계산 비교']);
+    rows.push(['대조 차이 알람 — 회사 보고서의 합계 줄과 도구 계산 비교 (금액 단위: 보고서 값은 보고서에 적힌 단위, 도구 값·차이는 원)']);
     if (!rc.hasReport) rows.push(['보고서 대조 자료 없음 — 「자료」의 「회사 보고서(대조용)」 자리에 월간 재고분석 통합문서를 올리면 합계를 맞대 봅니다.']);
     else if (!rc.alarms.length && !rc.acked.length && !(rc.units || []).length) rows.push(['차이 없음 — 비교한 ' + rc.compared + '개 값이 허용 차이(금액 ' + rc.tolerance + '원) 안입니다.']);
     else { rows.push(['차이 ' + rc.alarms.length + '건' + (rc.acked.length ? ', 확인함 ' + rc.acked.length + '건' : '') + ((rc.units || []).length ? ', 단위 차이 ' + rc.units.length + '건(알람 아님)' : '')]); rows.push(ALARM_HEAD); rows = rows.concat(alarmRows(rc, false)); }
@@ -1837,7 +2058,7 @@
   var api = {
     KINDS: KINDS, KIND_LABEL: KIND_LABEL, scanSales: scanSales, readSalesWorkbook: readSalesWorkbook, sheetRows: sheetRows, salesHeaderDiff: salesHeaderDiff, salesIndex: salesIndex, salesCoverage: salesCoverage,
     parseReportBook: parseReportBook, reconcile: reconcile, parsePlantAlias: parsePlantAlias,
-    parseReconUnits: parseReconUnits, parseUnitFactor: parseUnitFactor, detectUnitFactor: detectUnitFactor, factorLabel: factorLabel, mergeSalesFiles: mergeSalesFiles, isLong: isLong, longLabel: longLabel, overLabel: overLabel,
+    parseReconUnits: parseReconUnits, parseChinaCustomers: parseChinaCustomers, matchCustomer: matchCustomer, salesCustomers: salesCustomers, parseSummarySheet: parseSummarySheet, parseUnitFactor: parseUnitFactor, unitToTool: unitToTool, halfUnit: halfUnit, detectUnitFactor: detectUnitFactor, factorLabel: factorLabel, mergeSalesFiles: mergeSalesFiles, isLong: isLong, longLabel: longLabel, overLabel: overLabel,
     bucketSummary: bucketSummary, isOpenAging: isOpenAging, cellValue: cellValue, STOCK_SLOT: STOCK_SLOT,
     DEFS: DEFS, SLOTS: SLOTS, PLANTS: PLANTS, EXCLUDED_PLANTS: EXCLUDED_PLANTS, EFFECT_KEYS: EFFECT_KEYS, EFFECT_LABELS: EFFECT_LABELS,
     defaultSettings: defaultSettings, daysToMonths: daysToMonths, migrateSettings: migrateSettings, migrateSlotData: migrateSlotData,

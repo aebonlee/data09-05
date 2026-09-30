@@ -43,8 +43,15 @@ begin
     raise exception 'FAIL  3차 칸(분포 36·원자재 초과·반제품·제품 이상·판매현황 반제품·제품) (실제 % / % / % / %)', r.aging_max_months, r.long_raw_op, r.long_prod_op, r.sales_scope;
   end if;
   raise notice '  OK   예전 설정 행: 분포 최대 12 → 36, 원자재 「초과」·반제품·제품 「이상」 칸이 더해진다';
-  if r.recon_units is distinct from '' then raise exception 'FAIL  예전 설정 행에 보고서 칸 단위(recon_units) 칸이 더해지지 않았다'; end if;
-  raise notice '  OK   예전 설정 행에 보고서 칸 단위 칸(빈칸)이 더해진다';
+  -- 9차: 준비 단계에서 v0.5 처럼 recon_units 칸을 먼저 만들어 두었다(1번 행 빈칸, 2번 행 직접 적은 줄)
+  if r.recon_units is distinct from E'총괄 금액=백만원\n* 금액=원' then raise exception 'FAIL  칸 단위가 빈칸이던 예전 행에 9차 처음 값이 들어가지 않았다 (실제 %)', r.recon_units; end if;
+  raise notice '  OK   칸 단위가 빈칸이던 예전 행 → 「총괄 금액=백만원 / * 금액=원」';
+  if (select recon_units from public.app_settings where owner_id = 'aaaaaaaa-0000-0000-0000-000000000002') is distinct from '대구 반제품 7월 금액=×10' then
+    raise exception 'FAIL  직접 적어 둔 칸 단위가 바뀌었다';
+  end if;
+  raise notice '  OK   직접 적어 둔 칸 단위 줄은 그대로';
+  if r.raw_china_sales <> 'on' or r.china_customers <> '' then raise exception 'FAIL  중국공장 칸(raw_china_sales·china_customers)이 더해지지 않았다'; end if;
+  raise notice '  OK   예전 설정 행에 중국공장 판매 칸(켜짐·거래처 빈칸)이 더해진다';
   insert into public.upload_slot (owner_id, slot_id, part_key, plant, file_name)
     values ('aaaaaaaa-0000-0000-0000-000000000001', 'semiCur', 'plant:인천', '인천', '반제품.xlsx');
   raise notice '  OK   예전 판 위에서도 반제품 자리(semiCur)를 쓸 수 있다';
@@ -54,6 +61,9 @@ end $t$;
 insert into public.app_settings (owner_id, aging_bounds, over_days, dead_days)
   values ('aaaaaaaa-0000-0000-0000-000000000001', '90, 180, 365', 180, 365),
          ('aaaaaaaa-0000-0000-0000-000000000002', '30, 45, 60', 60, 120);
+-- v0.5(2026-09-30 오전) 판에만 있던 칸 단위 칸을 흉내: 1번 행 빈칸(처음 값 그대로), 2번 행 직접 적은 줄
+alter table public.app_settings add column recon_units text not null default '';
+update public.app_settings set recon_units = '대구 반제품 7월 금액=×10' where owner_id = 'aaaaaaaa-0000-0000-0000-000000000002';
 with u as (insert into public.upload_slot (owner_id, slot_id, file_name)
            values ('aaaaaaaa-0000-0000-0000-000000000001', 'rawCur', 'old.xlsx') returning id)
 insert into public.stock_item (owner_id, upload_id, code, qty) select 'aaaaaaaa-0000-0000-0000-000000000001', id, 'RM-1', 5 from u;

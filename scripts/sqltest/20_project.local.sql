@@ -118,7 +118,8 @@ begin
     '12/6/36/false'::text, '장기재고 처음 값 원자재 12 · 반제품·제품 6 · 분포 36 · 과잉 끔');
   perform public._assert_eq((select long_raw_op || '/' || long_prod_op || '/' || aging_path || '/' || sales_scope || '/' || recon_tolerance from public.app_settings),
     'gt/ge/out/prod/1'::text, '3차 처음 값: 원자재 초과 · 반제품·제품 이상 · 최근 출고일 경로 · 판매현황 반제품·제품 · 허용 차이 1원');
-  perform public._assert_eq((select recon_units from public.app_settings), ''::text, '보고서 칸 단위 처음 값은 빈칸(설정 없으면 10배 차이만 자동으로 찾음)');
+  perform public._assert_eq((select recon_units from public.app_settings), E'총괄 금액=백만원\n* 금액=원'::text, '보고서 칸 단위 처음 값 = 총괄 백만원 · 나머지 원(9차 확정, 줄바꿈이 글자 \n 이 아니라 실제 줄바꿈)');
+  perform public._assert_eq((select raw_china_sales || '/' || china_customers from public.app_settings), 'on/'::text, '원자재 중국공장 판매: 켜짐 · 거래처 빈칸(= 꺼짐과 같음)');
   -- 반제품 자리 · 판매현황 · 보고서 · 확인함
   insert into public.upload_slot (slot_id, part_key, plant, file_name) values ('semiCur', 'plant:인천', '인천', '본사.xlsx');
   insert into public.cause_memo (memo_key, kind, group_name, memo) values ('2026-08-31.all', 'semi', '고객1', '반제품 메모');
@@ -264,6 +265,8 @@ begin
     '23514', '대조 허용 차이는 음수 불가');
   perform public._assert_raises(format('insert into public.app_settings (owner_id, sales_scope) values (%L, %L)', gen_random_uuid(), 'raw'),
     '23514', '판매현황 적용 대상은 prod/all 만');
+  perform public._assert_raises(format('insert into public.app_settings (owner_id, raw_china_sales) values (%L, %L)', gen_random_uuid(), 'yes'),
+    '23514', '원자재 중국공장 판매는 on/off 만');
   perform public._assert_raises(format('insert into public.sales_month (owner_id, sales_file_id, code, month, last_day) values (%L, %s, %L, %L, 1)', a, (select id from public.sales_file where owner_id = a), 'P2', '2026-13'),
     '23514', '판매현황 달은 YYYY-MM(01~12)');
   perform public._assert_raises(format('insert into public.sales_month (owner_id, sales_file_id, code, month, last_day) values (%L, %s, %L, %L, 32)', a, (select id from public.sales_file where owner_id = a), 'P2', '2026-09'),
