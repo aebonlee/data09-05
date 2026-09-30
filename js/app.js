@@ -299,9 +299,58 @@
   }
 
   // ── 자료 화면 ─────────────────────────────────────────────
+  // ── 첫 화면 브랜드 블록 (2026-09-30 · 천일테크윈 소개서 색조, data09-07 과 같은 회사 · 05 고유 배치) ──────
+  // 회사 로고 · 도구 이름 · 한 줄 설명 · 바로가기 · 작업 순서, 그 아래 올린 자료로 계산한 요약 수치(자료가 없으면 수치를 보이지 않음)
+  var FLOW = [['data', '자료 올리기'], ['settings', '기준 설정'], ['raw', '구분별 분석'], ['cause', '증감 원인·관리대상'], ['recon', '보고서 대조'], ['', '엑셀 내려받기']];
+  function heroBlock() {
+    var flow = h('ol', { 'aria-labelledby': 'heroFlow' }, FLOW.map(function (f, i) {
+      var label = [h('span', { class: 'n' }, String(i + 1)), f[1]];
+      return h('li', null, f[0] ? h('a', { href: '#/' + f[0] }, label)
+        : h('button', { type: 'button', class: 'hero-step-btn', onclick: exportExcel }, label));
+    }));
+    return h('section', { class: 'hero', 'aria-labelledby': 'heroTitle' },
+      h('div', { class: 'hero-text' },
+        h('div', { class: 'hero-brand' }, h('img', { class: 'hero-logo', src: 'img/logo.png', width: '155', height: '128', alt: '천일테크윈 로고' }),
+          h('div', null, h('p', { class: 'hero-eyebrow' }, '원자재 · 반제품 · 제품 월간 재고'), h('h1', { id: 'heroTitle' }, '월간 재고 분석'))),
+        h('p', { class: 'hero-lead' }, '당월·전월 재고와 입출고·단가 자료를 올리면 증감 · 월 Aging · 장기재고 · 관리대상을 계산하고, 회사 보고서와 합계를 맞대 봅니다.'),
+        h('p', { class: 'hero-principle' }, '올린 파일은 이 브라우저 안에서만 계산하고, 불용 확정과 원인 메모는 담당자가 정합니다.'),
+        h('div', { class: 'actions' },
+          h('a', { class: 'btn btn-primary', href: '#/settings' }, '기준 설정'),
+          h('a', { class: 'btn', href: '#/raw' }, '원자재 분석'),
+          h('a', { class: 'btn', href: '#/recon' }, '대조·알람'),
+          h('button', { type: 'button', class: 'btn', onclick: exportExcel }, '엑셀 내려받기'))),
+      h('div', { class: 'hero-flow' }, h('p', { class: 'hero-flow-title', id: 'heroFlow' }, '작업 순서'), flow));
+  }
+  // 요약 수치 — 모두 올린 자료로 계산합니다(고정 숫자 없음). 공장 보기(합계·인천·대구)를 따릅니다.
+  function heroKpis() {
+    if (!hasStock()) return h('p', { class: 'hero-empty note' }, '자료를 올리면 여기에 당월 재고금액 · 장기재고 금액 · 관리대상 후보 · 보고서 대조 차이가 계산되어 보입니다. 아래 「예시 데이터 불러오기」로 먼저 둘러볼 수 있습니다.');
+    var res = result();
+    if (!res.ok) return null;
+    var cur = 0, prev = 0, longAmt = 0, longCnt = 0;
+    ['raw', 'semi', 'product'].forEach(function (kk) {
+      var t = res[kk].groups.total;
+      cur += t.curAmt || 0; prev += t.prevAmt || 0;
+      res[kk].fitness.forEach(function (f) { if (f.fitness === '장기재고') { longAmt += f.amount || 0; longCnt += f.count || 0; } });
+    });
+    var diff = L.round(cur - prev, 2);
+    var alarms = res.recon ? res.recon.alarms.length : null;
+    var share = cur ? L.round(longAmt / cur * 100, 1) + '%' : '';
+    return h('div', { class: 'stats hero-kpis', 'aria-label': '요약 수치 — ' + plantText() },
+      h('a', { class: 'stat', href: '#/raw' }, h('div', { class: 'stat-label' }, '당월 재고금액 (원자재+반제품+제품)'), h('div', { class: 'stat-value' }, fmt(L.round(cur, 0))),
+        h('div', { class: 'stat-sub' }, '전월 대비 ' + fmtSigned(L.round(diff, 0)) + ' · ' + plantText())),
+      h('a', { class: 'stat', href: '#/raw' }, h('div', { class: 'stat-label' }, '장기재고 금액'), h('div', { class: 'stat-value' }, fmt(L.round(longAmt, 0))),
+        h('div', { class: 'stat-sub' }, fmt(longCnt) + '품목' + (share ? ' · 당월 금액의 ' + share : ''))),
+      h('a', { class: 'stat', href: '#/targets' }, h('div', { class: 'stat-label' }, '관리대상 후보'), h('div', { class: 'stat-value' }, fmt(res.targets.length) + '건'),
+        h('div', { class: 'stat-sub' }, '금액 증가 상위 · 장기 미출고 · 저회전')),
+      h('a', { class: 'stat', href: '#/recon' }, h('div', { class: 'stat-label' }, '보고서 대조 차이'), h('div', { class: 'stat-value' + (alarms ? ' up' : '') }, alarms == null ? '보고서 없음' : fmt(alarms) + '건'),
+        h('div', { class: 'stat-sub' }, alarms == null ? '「회사 보고서(대조용)」를 올리면 계산' : '기준일 ' + res.curDate)));
+  }
+
   function viewData() {
     var wrap = h('div', null,
-      h('div', { class: 'page-head' }, h('h1', null, '자료 올리기 · 컬럼 짝짓기')),
+      heroBlock(),
+      heroKpis(),
+      h('div', { class: 'page-head' }, h('h2', { class: 'page-title' }, '자료 올리기 · 컬럼 짝짓기')),
       h('div', { class: 'card' },
         h('p', null, '월말 재고 파일과 입출고·단가 파일을 올립니다. 엑셀(xlsx·xls)과 CSV 를 읽습니다. 파일은 외부로 보내지 않고 이 브라우저 안에서만 계산합니다.'),
         h('p', { class: 'note' }, '인천·대구처럼 공장별로 파일이 나뉘어 있으면 같은 자리에 파일을 하나씩 더 올려 주세요. 파일마다 공장을 지정합니다(파일 이름에 「본사」「인천」「대구」가 있으면 자동으로 골라 둡니다). 중국공장 행은 분석에서 뺍니다.'),

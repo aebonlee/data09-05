@@ -210,3 +210,91 @@ tr.alarm-row td { background: #fff1ef; }
 .month-cell.gap { border-color: var(--danger); color: #7a1c14; background: #fdecea; font-weight: 600; }
 .basis-line { margin: 4px 0 10px; padding: 8px 12px; border-left: 4px solid var(--primary); background: #eaf1fa; color: #123a66; border-radius: 0 var(--radius) var(--radius) 0; word-break: keep-all; overflow-wrap: break-word; }
 .fifo-box { margin-top: 18px; padding-top: 4px; border-top: 1px dashed var(--line); }
+
+/* ── 2026-09-30 12차: 천일테크윈 소개서 색조 · 회사 로고 · 첫 화면 브랜드 블록 ─────────────
+   같은 회사 도구인 data09-07 과 색 계열(로열 블루·남색·하늘색)은 같고, 05 는 소개서의 강철 남색 #24448B 와
+   밝은 청보라 #5D8EFF 를 강조색으로 씁니다. 장식은 삼각형 대신 「개월별 재고 막대」 모양입니다.
+   앞 규칙은 고치지 않고 이 층에서 덮어씁니다(파일 맨 끝이어야 이깁니다). */
+:root {
+  --bg: #f3f6fb;
+  --surface: #ffffff;
+  --text: #16203a;
+  --muted: #4f5b73;
+  --line: #d3dcea;
+  --primary: #0043da;       /* 소개서 로열 블루 — 버튼 · 링크 · 선택 메뉴 */
+  --primary-dark: #002d92;  /* 소개서 짙은 남색 — 제목 · 강조 숫자 */
+  --on-primary: #ffffff;
+  --brand-steel: #24448b;   /* 소개서 강철 남색 — 05 강조색(선택 메뉴 · 첫 블록 중간) */
+  --brand-deep: #002578;    /* 소개서 가장 짙은 남색 — 첫 블록 비탈 시작 */
+  --accent: #5d8eff;        /* 소개서 청보라 — 장식 · 요약 수치 윗선(글자에는 안 씀) */
+  --sky: #a4d1f2;           /* 소개서 하늘색 — 짙은 바탕 위 선 · 장식 */
+  --sky-soft: #dcecfa;      /* 짙은 바탕 위 보조 글자 */
+}
+.site-header { box-shadow: inset 0 -3px 0 var(--primary); }
+.header-inner { padding-bottom: 13px; }
+.brand { flex-direction: row; align-items: center; gap: 10px; }
+.brand-logo { display: block; width: 44px; height: auto; aspect-ratio: 155 / 128; flex: 0 0 auto; border-radius: 3px; }
+.brand-text { display: flex; flex-direction: column; min-width: 0; }
+.brand-name { color: var(--primary-dark); letter-spacing: -.01em; }
+.nav a[aria-current="page"] { background: var(--brand-steel); color: #ffffff; box-shadow: inset 0 -3px 0 var(--sky); }
+.nav a:hover { background: var(--sky-soft); }
+.page-head h1, .page-head .page-title { margin: 0 auto 0 0; font-size: 1.5rem; color: var(--primary-dark); padding-bottom: 3px; border-bottom: 3px solid var(--primary); }
+.card > h2:first-child { color: var(--primary-dark); }
+
+.hero {
+  position: relative; overflow: hidden; isolation: isolate;
+  display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 20px 28px; align-items: center;
+  margin-bottom: 16px; padding: 26px 28px; border-radius: 12px; color: #ffffff;
+  background: linear-gradient(160deg, var(--brand-deep) 0%, var(--brand-steel) 55%, var(--primary) 100%);
+}
+/* 장식: 오른쪽 아래 개월별 재고 막대 4개(옅은 청보라)와 위쪽 옅은 사각 틀. 글자 밑에 깔려도 대비 4.5:1 이상이 되도록 투명도를 계산했습니다(막대 .10 · 틀 .06 · hover .10 — 겹친 최악 4.78:1) */
+.hero::before, .hero::after { content: ""; position: absolute; z-index: -1; pointer-events: none; }
+.hero::before {
+  right: 24px; bottom: 0; width: 220px; height: 150px;
+  background:
+    linear-gradient(rgba(93, 142, 255, .10) 0 0) 0 100% / 36px 40% no-repeat,
+    linear-gradient(rgba(93, 142, 255, .10) 0 0) 60px 100% / 36px 62% no-repeat,
+    linear-gradient(rgba(93, 142, 255, .10) 0 0) 120px 100% / 36px 82% no-repeat,
+    linear-gradient(rgba(164, 209, 242, .10) 0 0) 180px 100% / 36px 100% no-repeat;
+}
+.hero::after { right: -50px; top: -50px; width: 190px; height: 190px; border: 22px solid rgba(255, 255, 255, .06); border-radius: 18px; transform: rotate(18deg); }
+.hero-text { min-width: 0; }
+.hero-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.hero-logo { display: block; width: 56px; height: auto; aspect-ratio: 155 / 128; border-radius: 4px; box-shadow: 0 0 0 2px rgba(255, 255, 255, .9); flex: 0 0 auto; }
+.hero-eyebrow { margin: 0; font-size: .88rem; font-weight: 700; color: var(--sky-soft); }
+.hero h1 { margin: 0; color: #ffffff; font-size: 1.75rem; }
+.hero-lead { margin: 0 0 10px; color: #eef4fd; }
+.hero-principle { margin: 0 0 16px; padding-left: 10px; border-left: 3px solid var(--sky); color: var(--sky-soft); font-size: .92rem; }
+.hero .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.hero .btn { background: transparent; color: #ffffff; border-color: rgba(255, 255, 255, .75); }
+.hero .btn:hover { background: rgba(255, 255, 255, .10); border-color: #ffffff; }
+.hero .btn-primary { background: #ffffff; color: var(--primary-dark); border-color: #ffffff; }
+.hero .btn-primary:hover { background: var(--sky-soft); }
+.hero-flow { padding: 14px 16px; border-radius: 10px; background: rgba(0, 20, 70, .28); border: 1px solid rgba(255, 255, 255, .28); min-width: 0; }
+.hero-flow-title { margin: 0 0 8px; font-size: .85rem; font-weight: 700; color: #eef4fd; }
+.hero-flow ol { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+.hero-flow li { min-width: 0; }
+.hero-flow a, .hero-step-btn {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 4px 6px; border-radius: 6px;
+  color: #ffffff; text-decoration: none; font-weight: 600; font-size: .93rem; text-align: left;
+  background: transparent; border: 0; cursor: pointer;
+}
+.hero-flow a:hover, .hero-step-btn:hover { background: rgba(255, 255, 255, .10); }
+.hero-flow .n { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; background: #ffffff; color: var(--primary-dark); font-weight: 800; font-size: .85rem; flex: 0 0 auto; }
+.hero-kpis { margin: 0 0 20px; }
+.hero-kpis .stat { display: block; text-decoration: none; color: var(--text); border-top: 4px solid var(--accent); }
+.hero-kpis .stat:hover { border-color: var(--primary); }
+.hero-kpis .stat-value { color: var(--primary-dark); }
+.hero-kpis .stat-value.up { color: var(--up); }
+.hero-empty { margin: 0 0 20px; padding: 10px 14px; border-left: 4px solid var(--accent); background: var(--surface); border-radius: 0 var(--radius) var(--radius) 0; }
+@media (max-width: 1023px) {
+  .hero { grid-template-columns: minmax(0, 1fr); }
+  .hero-flow ol { grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); }
+}
+@media (max-width: 767px) {
+  .hero { padding: 20px 18px; border-radius: 10px; }
+  .hero h1 { font-size: 1.4rem; }
+  .hero-logo { width: 46px; }
+  .hero::before { right: 8px; transform: scale(.7); transform-origin: 100% 100%; }
+  .brand-logo { width: 38px; }
+}
